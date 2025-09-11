@@ -7,6 +7,7 @@ from scene import (
     Materials,
     build_scene,
     compute_ceiling_light_mask,
+    RectPrism,
 )
 from linear_system import (
     build_linear_system,
@@ -37,12 +38,22 @@ def main():
     # Base light size (per scenario can override)
     light_size = (1.0, 1.0)
 
+    # Add four rectangular prisms (varying sizes), same subdivision as cube
+    prisms = [
+        # Near corners with small offsets, heights vary
+        RectPrism(x0=0.3, x1=0.9, y0=0.3, y1=0.7, z0=1e-3, z1=0.6),
+        RectPrism(x0=W-1.0, x1=W-0.3, y0=0.4, y1=1.2, z0=1e-3, z1=0.9),
+        RectPrism(x0=0.6, x1=1.4, y0=D-1.2, y1=D-0.4, z0=1e-3, z1=0.7),
+        RectPrism(x0=W-1.4, x1=W-0.6, y0=D-1.0, y1=D-0.3, z0=1e-3, z1=1.1),
+    ]
+
     config = SceneConfig(
         box=BoxDimensions(W=W, D=D, H=H),
         materials=materials,
         # Scene built without fixed lights; scenarios specify masks dynamically
         light_size=light_size,
         light_positions=None,
+        extra_prisms=prisms,
     )
 
     scene = build_scene(config)

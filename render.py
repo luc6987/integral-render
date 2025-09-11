@@ -1,6 +1,6 @@
 import numpy as np  # type: ignore
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 from scene import BuiltScene, BoxDimensions
 
@@ -60,32 +60,10 @@ def build_L_face(scene: BuiltScene, L: np.ndarray) -> Dict[str, np.ndarray]:
                 V[j, i] = L[idx]
         return V
 
-    L_face = {
-        "floor": collect_face_map("floor", scene.sub_by_face["floor"]),
-        "ceiling": collect_face_map("ceiling", scene.sub_by_face["ceiling"]),
-        "wall_x0": collect_face_map("wall_x0", scene.sub_by_face["wall_x0"]),
-        "wall_x1": collect_face_map("wall_x1", scene.sub_by_face["wall_x1"]),
-        "wall_y0": collect_face_map("wall_y0", scene.sub_by_face["wall_y0"]),
-        "wall_y1": collect_face_map("wall_y1", scene.sub_by_face["wall_y1"]),
-        "cube_top": collect_face_map(
-            "cube_top", scene.sub_by_face["cube_top"]
-        ),
-        "cube_bottom": collect_face_map(
-            "cube_bottom", scene.sub_by_face["cube_bottom"]
-        ),
-        "cube_x0": collect_face_map(
-            "cube_x0", scene.sub_by_face["cube_x0"]
-        ),
-        "cube_x1": collect_face_map(
-            "cube_x1", scene.sub_by_face["cube_x1"]
-        ),
-        "cube_y0": collect_face_map(
-            "cube_y0", scene.sub_by_face["cube_y0"]
-        ),
-        "cube_y1": collect_face_map(
-            "cube_y1", scene.sub_by_face["cube_y1"]
-        ),
-    }
+    # Build maps for all faces registered in sub_by_face (handles prisms dynamically)
+    L_face: Dict[str, np.ndarray] = {}
+    for face_name, sub in scene.sub_by_face.items():
+        L_face[face_name] = collect_face_map(face_name, sub)
     return L_face
 
 
@@ -121,10 +99,66 @@ def render_photo(
 
     img = np.zeros((height, width, 3), dtype=np.float32)
 
+    def intersect_prism(ray_o: np.ndarray, ray_d: np.ndarray, name: str, bounds) -> Tuple[float, Optional[str], Optional[np.ndarray]]:
+        bx0, bx1 = bounds.x0, bounds.x1
+        by0, by1 = bounds.y0, bounds.y1
+        bz0, bz1 = bounds.z0, bounds.z1
+        tmin = np.inf
+        hit_face = None
+        hit_p = None
+        # z planes
+        if abs(ray_d[2]) > 1e-8:
+            t = (bz0 - ray_o[2]) / ray_d[2]
+            if t > 1e-6:
+                p = ray_o + t * ray_d
+                ok = bx0 <= p[0] <= bx1 and by0 <= p[1] <= by1
+                if ok and t < tmin:
+                    tmin, hit_face, hit_p = t, f"{name}_bottom", p
+            t = (bz1 - ray_o[2]) / ray_d[2]
+            if t > 1e-6:
+                p = ray_o + t * ray_d
+                ok = bx0 <= p[0] <= bx1 and by0 <= p[1] <= by1
+                if ok and t < tmin:
+                    tmin, hit_face, hit_p = t, f"{name}_top", p
+        # x planes
+        if abs(ray_d[0]) > 1e-8:
+            t = (bx0 - ray_o[0]) / ray_d[0]
+            if t > 1e-6:
+                p = ray_o + t * ray_d
+                ok = by0 <= p[1] <= by1 and bz0 <= p[2] <= bz1
+                if ok and t < tmin:
+                    tmin, hit_face, hit_p = t, f"{name}_x0", p
+            t = (bx1 - ray_o[0]) / ray_d[0]
+            if t > 1e-6:
+                p = ray_o + t * ray_d
+                ok = by0 <= p[1] <= by1 and bz0 <= p[2] <= bz1
+                if ok and t < tmin:
+                    tmin, hit_face, hit_p = t, f"{name}_x1", p
+        # y planes
+        if abs(ray_d[1]) > 1e-8:
+            t = (by0 - ray_o[1]) / ray_d[1]
+            if t > 1e-6:
+                p = ray_o + t * ray_d
+                ok = bx0 <= p[0] <= bx1 and bz0 <= p[2] <= bz1
+                if ok and t < tmin:
+                    tmin, hit_face, hit_p = t, f"{name}_y0", p
+            t = (by1 - ray_o[1]) / ray_d[1]
+            if t > 1e-6:
+                p = ray_o + t * ray_d
+                ok = bx0 <= p[0] <= bx1 and bz0 <= p[2] <= bz1
+                if ok and t < tmin:
+                    tmin, hit_face, hit_p = t, f"{name}_y1", p
+        return tmin, hit_face, hit_p
+
     def intersect_scene(ray_o: np.ndarray, ray_d: np.ndarray):
         tmin = np.inf
         hit_face = None
         hit_p = None
+        # Intersect all extra prisms
+        for pb in scene.prisms:
+            t, f, p = intersect_prism(ray_o, ray_d, pb.name, pb)
+            if f is not None and t < tmin:
+                tmin, hit_face, hit_p = t, f, p
         if abs(ray_d[2]) > 1e-8:
             t = (cube_z0 - ray_o[2]) / ray_d[2]
             if t > 1e-6:
@@ -236,6 +270,22 @@ def render_photo(
             nx, ny = scene.sub_by_face["cube_y0"]
             u = (p[0] - cube_x0) / (cube_x1 - cube_x0)
             v = (p[2] - cube_z0) / (cube_z1 - cube_z0)
+        elif face in scene.prism_bounds_map:
+            nx, ny = scene.sub_by_face[face]
+            pb = scene.prism_bounds_map[face]
+            # suffix: last token after '_'
+            suff = face.rsplit("_", 1)[-1]
+            if suff in ("top", "bottom"):
+                u = (p[0] - pb.x0) / (pb.x1 - pb.x0)
+                v = (p[1] - pb.y0) / (pb.y1 - pb.y0)
+            elif suff in ("x0", "x1"):
+                u = (p[1] - pb.y0) / (pb.y1 - pb.y0)
+                v = (p[2] - pb.z0) / (pb.z1 - pb.z0)
+            elif suff in ("y0", "y1"):
+                u = (p[0] - pb.x0) / (pb.x1 - pb.x0)
+                v = (p[2] - pb.z0) / (pb.z1 - pb.z0)
+            else:
+                return (0, 0)
         else:
             return (0, 0)
         i = min(nx - 1, max(0, int(u * nx)))

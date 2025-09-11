@@ -48,6 +48,8 @@ class SceneConfig:
     cube: CubeParams = field(
         default_factory=lambda: CubeParams(size=1.0, z0=1e-3)
     )
+    # Extra rectangular prisms (axis-aligned), optional
+    extra_prisms: Optional[List["RectPrism"]] = None
 
 
 class Patch:
@@ -144,6 +146,30 @@ class BuiltScene:
     is_light: np.ndarray
     sub_by_face: Dict[str, Tuple[int, int]]
     cube_bounds: Dict[str, float]
+    # Additional prisms and a face->bounds map for rendering
+    prisms: List["PrismBounds"]
+    prism_bounds_map: Dict[str, "PrismBounds"]
+
+
+@dataclass
+class RectPrism:
+    x0: float
+    x1: float
+    y0: float
+    y1: float
+    z0: float
+    z1: float
+
+
+@dataclass
+class PrismBounds:
+    name: str
+    x0: float
+    x1: float
+    y0: float
+    y1: float
+    z0: float
+    z1: float
 
 
 def build_scene(config: SceneConfig) -> BuiltScene:
@@ -351,6 +377,105 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         face="cube_y1",
     )
 
+    # Extra prisms (axis-aligned boxes) with same subdivision as cube
+    prisms: List[PrismBounds] = []
+    prism_bounds_map: Dict[str, PrismBounds] = {}
+    if config.extra_prisms:
+        for k, rp in enumerate(config.extra_prisms):
+            name = f"prism{k}"
+            pb = PrismBounds(name=name, x0=rp.x0, x1=rp.x1, y0=rp.y0, y1=rp.y1, z0=rp.z0, z1=rp.z1)
+            prisms.append(pb)
+            # Top
+            origin_ptop = np.array([rp.x0, rp.y0, rp.z1])
+            ux_ptop = np.array([rp.x1 - rp.x0, 0.0, 0.0])
+            uy_ptop = np.array([0.0, rp.y1 - rp.y0, 0.0])
+            face_top = f"{name}_top"
+            patches += _make_grid_on_plane(
+                origin_ptop,
+                ux_ptop,
+                uy_ptop,
+                *sub_cube,
+                rho_cube,
+                np.array([0, 0, 1]),
+                face=face_top,
+            )
+            prism_bounds_map[face_top] = pb
+            # Bottom
+            origin_pbot = np.array([rp.x0, rp.y0, rp.z0])
+            ux_pbot = np.array([rp.x1 - rp.x0, 0.0, 0.0])
+            uy_pbot = np.array([0.0, rp.y1 - rp.y0, 0.0])
+            face_bot = f"{name}_bottom"
+            patches += _make_grid_on_plane(
+                origin_pbot,
+                ux_pbot,
+                uy_pbot,
+                *sub_cube,
+                rho_cube,
+                np.array([0, 0, -1]),
+                face=face_bot,
+            )
+            prism_bounds_map[face_bot] = pb
+            # x0
+            origin_px0 = np.array([rp.x0, rp.y0, rp.z0])
+            ux_px0 = np.array([0.0, rp.y1 - rp.y0, 0.0])
+            uy_px0 = np.array([0.0, 0.0, rp.z1 - rp.z0])
+            face_x0 = f"{name}_x0"
+            patches += _make_grid_on_plane(
+                origin_px0,
+                ux_px0,
+                uy_px0,
+                *sub_cube,
+                rho_cube,
+                np.array([-1, 0, 0]),
+                face=face_x0,
+            )
+            prism_bounds_map[face_x0] = pb
+            # x1
+            origin_px1 = np.array([rp.x1, rp.y0, rp.z0])
+            ux_px1 = np.array([0.0, rp.y1 - rp.y0, 0.0])
+            uy_px1 = np.array([0.0, 0.0, rp.z1 - rp.z0])
+            face_x1 = f"{name}_x1"
+            patches += _make_grid_on_plane(
+                origin_px1,
+                ux_px1,
+                uy_px1,
+                *sub_cube,
+                rho_cube,
+                np.array([1, 0, 0]),
+                face=face_x1,
+            )
+            prism_bounds_map[face_x1] = pb
+            # y0
+            origin_py0 = np.array([rp.x0, rp.y0, rp.z0])
+            ux_py0 = np.array([rp.x1 - rp.x0, 0.0, 0.0])
+            uy_py0 = np.array([0.0, 0.0, rp.z1 - rp.z0])
+            face_y0 = f"{name}_y0"
+            patches += _make_grid_on_plane(
+                origin_py0,
+                ux_py0,
+                uy_py0,
+                *sub_cube,
+                rho_cube,
+                np.array([0, -1, 0]),
+                face=face_y0,
+            )
+            prism_bounds_map[face_y0] = pb
+            # y1
+            origin_py1 = np.array([rp.x0, rp.y1, rp.z0])
+            ux_py1 = np.array([rp.x1 - rp.x0, 0.0, 0.0])
+            uy_py1 = np.array([0.0, 0.0, rp.z1 - rp.z0])
+            face_y1 = f"{name}_y1"
+            patches += _make_grid_on_plane(
+                origin_py1,
+                ux_py1,
+                uy_py1,
+                *sub_cube,
+                rho_cube,
+                np.array([0, 1, 0]),
+                face=face_y1,
+            )
+            prism_bounds_map[face_y1] = pb
+
     centers = np.array([p.center for p in patches])
     normals = np.array([p.normal for p in patches])
     areas = np.array([p.area for p in patches])
@@ -372,6 +497,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         "cube_y1": sub_cube,
     }
 
+    # Register prism faces with same subdivision as cube
+    for pb in prisms:
+        for suffix in ("top", "bottom", "x0", "x1", "y0", "y1"):
+            sub_by_face[f"{pb.name}_{suffix}"] = sub_cube
+
     cube_bounds = {
         "cube_x0": cube_x0,
         "cube_x1": cube_x1,
@@ -390,6 +520,8 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         is_light=is_light_arr,
         sub_by_face=sub_by_face,
         cube_bounds=cube_bounds,
+        prisms=prisms,
+        prism_bounds_map=prism_bounds_map,
     )
 
 
