@@ -15,26 +15,17 @@ def _save_csv_vector(vec: np.ndarray, out_path: Path, header: str) -> Path:
 def solve_from_csv(csv_dir: Path) -> dict:
     """Solve Ax=b from CSV in csv_dir; supports single or multiple right-hand sides.
 
-    - Preferred names: `A.csv` and `b.csv`.
-    - Legacy fallback: `M.csv` and `E.csv`.
-    - Saves solution `x.csv` (radiosity) and `L.csv` (radiance = x/pi).
+    - Uses `A.csv` and `b.csv` only.
+    - Saves `x.csv` (radiosity) and `L.csv` (radiance = x/pi).
     """
     A_path = csv_dir / "A.csv"
     b_path = csv_dir / "b.csv"
-    legacy_M = csv_dir / "M.csv"
-    legacy_E = csv_dir / "E.csv"
-    if A_path.exists() and b_path.exists():
-        print(f"[Solve] Loading A from {A_path}")
-        print(f"[Solve] Loading b from {b_path}")
-        A = _load_csv_matrix(A_path)
-        b = _load_csv_matrix(b_path)
-    elif legacy_M.exists() and legacy_E.exists():
-        print(f"[Solve] Loading M from {legacy_M}")
-        print(f"[Solve] Loading E from {legacy_E}")
-        A = _load_csv_matrix(legacy_M)
-        b = _load_csv_matrix(legacy_E)
-    else:
-        raise FileNotFoundError("A/b or M/E not found in " + str(csv_dir))
+    if not A_path.exists() or not b_path.exists():
+        raise FileNotFoundError("A.csv or b.csv not found in " + str(csv_dir))
+    print(f"[Solve] Loading A from {A_path}")
+    print(f"[Solve] Loading b from {b_path}")
+    A = _load_csv_matrix(A_path)
+    b = _load_csv_matrix(b_path)
 
     # Ensure b is 2D: (N,) -> (N,1)
     if b.ndim == 1:

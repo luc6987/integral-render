@@ -2,8 +2,8 @@ import numpy as np  # type: ignore
 from pathlib import Path
 from typing import Dict, Tuple, List
 
-from scene import BuiltScene
-from scene import build_scene, compute_ceiling_light_mask
+from .scene import BuiltScene
+from .scene import build_scene, compute_ceiling_light_mask
 from setup import scene_config, scenarios, light_size, materials
 try:
     from tqdm import tqdm  # type: ignore
@@ -95,25 +95,7 @@ def build_system_matrix(F: np.ndarray, rho: np.ndarray) -> np.ndarray:
     return M
 
 
-def export_system_to_csv(M: np.ndarray, E: np.ndarray, out_dir: Path) -> Dict[str, Path]:
-    """Export dense M and E as CSV files into out_dir, with headers.
-
-    If E has multiple columns, they are saved in one E.csv (columns=scenarios).
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    M_path = out_dir / "M.csv"
-    e_path = out_dir / "E.csv"
-    mh = f"M = I - diag(rho) F, shape {M.shape[0]}x{M.shape[1]}"
-    eh = (
-        f"E (emission), length {E.shape[0]}"
-        if E.ndim == 1
-        else f"E (emission), shape {E.shape[0]}x{E.shape[1]} (columns=scenarios)"
-    )
-    np.savetxt(M_path, M, delimiter=",", header=mh, comments="")
-    np.savetxt(e_path, E, delimiter=",", header=eh, comments="")
-    print(f"[LinearSystem] Exported M.csv to {M_path}")
-    print(f"[LinearSystem] Exported E.csv to {e_path}")
-    return {"M": M_path, "E": e_path}
+# Legacy CSV export removed; use export_Ab_to_csv only.
 
 
 def export_Ab_to_csv(A: np.ndarray, b: np.ndarray, out_dir: Path) -> Dict[str, Path]:
@@ -136,38 +118,7 @@ def export_Ab_to_csv(A: np.ndarray, b: np.ndarray, out_dir: Path) -> Dict[str, P
     return {"A": A_path, "b": b_path}
 
 
-def export_multiple_E_to_csv(
-    E_list: "list[np.ndarray]",
-    names: "list[str]",
-    out_path: Path,
-) -> Path:
-    """Export multiple E vectors side-by-side into a single CSV file.
-
-    Rows correspond to patches, columns to scenarios.
-    Header encodes number of patches and scenario names.
-    """
-    if len(E_list) == 0:
-        raise ValueError("E_list is empty")
-    N = E_list[0].shape[0]
-    for idx, E in enumerate(E_list):
-        if E.shape[0] != N:
-            raise ValueError(f"E_list[{idx}] length mismatch: {E.shape[0]} != {N}")
-    if len(names) != len(E_list):
-        raise ValueError("names and E_list lengths differ")
-    # Stack as N x K (columns are scenarios)
-    K = len(E_list)
-    M = np.zeros((N, K), dtype=float)
-    for k, E in enumerate(E_list):
-        M[:, k] = E
-    header = (
-        f"E_multi: patches={N}, scenarios={K}; columns=|" + "|".join(names) + "|"
-    )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savetxt(out_path, M, delimiter=",", header=header, comments="")
-    print(
-        f"[LinearSystem] Exported multi-scenario E to {out_path} (N={N}, K={K})."
-    )
-    return out_path
+# Legacy multi-E export removed; stack columns into b.csv via export_Ab_to_csv.
 
 
 def _save_csv_vector(vec: np.ndarray, out_path: Path, header: str) -> Path:
@@ -188,7 +139,8 @@ def _build_M_E_for_scenario(scene: BuiltScene, F: np.ndarray, *, positions, size
 
 def main_export_linear_system() -> None:
     # Build scene and F
-    out_dir = Path(__file__).parent / "linear_system_csv"
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    out_dir = PROJECT_ROOT / "linear_system_csv"
     print("[LinearSystem:CLI] Building scene and assembling F...")
     scene = build_scene(scene_config)
     F, _ = build_linear_system(scene)
@@ -215,9 +167,8 @@ def main_export_linear_system() -> None:
         )
         b_cols.append(Ei)
     b = E0 if len(b_cols) == 1 else np.stack(b_cols, axis=1)
-    # Export with both namings for convenience
+    # Export canonical Ax=b only
     export_Ab_to_csv(M0, b, out_dir)
-    export_system_to_csv(M0, b, out_dir)
     print(f"[LinearSystem:CLI] Export complete in {out_dir}")
 
 

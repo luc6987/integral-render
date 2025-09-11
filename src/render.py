@@ -1,11 +1,21 @@
 import numpy as np  # type: ignore
 from pathlib import Path
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional
 
-from scene import BuiltScene, BoxDimensions
-from scene import build_scene
-from setup import scene_config, cam_pos, cam_look, cam_up, width, height, fov_y_deg, exposure, brightness
+from .scene import BuiltScene, BoxDimensions, build_scene
+from setup import (
+    scene_config,
+    cam_pos,
+    cam_look,
+    cam_up,
+    width,
+    height,
+    fov_y_deg,
+    exposure,
+    brightness,
+)
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EPS = 1e-9
 
 
@@ -349,42 +359,23 @@ def _load_csv_matrix(path: Path) -> np.ndarray:
     return np.loadtxt(path, delimiter=",", skiprows=1)
 
 
-def _parse_multi_header_names(path: Path) -> Optional[List[str]]:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            header = f.readline().strip()
-        if "columns=|" in header:
-            part = header.split("columns=|")[-1]
-            cols = part.split("|")
-            # last split after trailing | yields ['last','']; drop empties
-            names = [c for c in cols if c]
-            return names
-    except Exception:
-        pass
-    return None
+"""Legacy multi-header parsing removed."""
 
 
 def main_from_csv():
     """Render images by loading radiosity/radiance from CSV.
 
-    Preference order:
-    - L_multi.csv (render each column with names parsed from header)
-    - L.csv (single image)
-    If only B*.csv present, convert to L via division by pi.
+    Reads L.csv (single or multi-column), otherwise x.csv (converted to L).
     """
-    csv_dir = Path(__file__).parent / "linear_system_csv"
-    out_dir = Path(__file__).parent / "outputs"
+    csv_dir = PROJECT_ROOT / "linear_system_csv"
+    out_dir = PROJECT_ROOT / "outputs"
     scene = build_scene(scene_config)
 
-    # Preferred names
+    # Files
     L_path = csv_dir / "L.csv"
     x_path = csv_dir / "x.csv"
-    # Legacy fallbacks
-    B_path = csv_dir / "B.csv"
-    Lm_path = csv_dir / "L_multi.csv"  # still supported
-    Bm_path = csv_dir / "B_multi.csv"
 
-    def render_columns(Lmat: np.ndarray, suffix_names: Optional[List[str]] = None):
+    def render_columns(Lmat: np.ndarray):
         cols = 1 if Lmat.ndim == 1 else Lmat.shape[1]
         for k in range(cols):
             Lvec = Lmat if cols == 1 else Lmat[:, k]
@@ -402,7 +393,7 @@ def main_from_csv():
                 exposure=exposure,
                 brightness=brightness,
             )
-            name = f"col{k}" if suffix_names is None else suffix_names[k]
+            name = f"col{k}"
             save_image(img, out_dir / f"render_from_csv_{name}.png")
 
     if L_path.exists():
@@ -416,25 +407,7 @@ def main_from_csv():
         Lm = Xm / np.pi
         render_columns(Lm)
         return
-    if Lm_path.exists():
-        print(f"[Render:CLI] Loading L_multi from {Lm_path}")
-        Lm = _load_csv_matrix(Lm_path)
-        names = _parse_multi_header_names(Lm_path) or [f"col{k}" for k in range(Lm.shape[1])]
-        render_columns(Lm, names)
-        return
-    if B_path.exists():
-        print(f"[Render:CLI] Loading B from {B_path}")
-        B = _load_csv_matrix(B_path)
-        render_columns(B / np.pi)
-        return
-    if Bm_path.exists():
-        print(f"[Render:CLI] Loading B_multi from {Bm_path}")
-        Bm = _load_csv_matrix(Bm_path)
-        names = _parse_multi_header_names(Bm_path) or [f"col{k}" for k in range(Bm.shape[1])]
-        render_columns(Bm / np.pi, names)
-        return
-
-    raise FileNotFoundError("No L*.csv or B*.csv found in linear_system_csv")
+    raise FileNotFoundError("No L.csv or x.csv found in linear_system_csv")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 import numpy as np  # type: ignore
 
-from scene import (
+from src.scene import (
     Materials,
     BoxDimensions,
     SceneConfig,
