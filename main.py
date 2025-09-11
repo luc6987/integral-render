@@ -1,7 +1,7 @@
 from pathlib import Path
-from linear_system import main_export_linear_system
-from solve import solve_from_csv
-from render import main_from_csv
+from src.linear_system import main_export_linear_system
+from src.solve import solve_from_csv
+from src.render import main_from_csv
 
 
 def main():
