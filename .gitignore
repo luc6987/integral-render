@@ -11,3 +11,6 @@ dist/
 *.egg-info/
 .DS_Store
 outputs/
+
+# Ignore generated linear system CSV exports
+linear_system_csv/
