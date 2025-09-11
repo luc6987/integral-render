@@ -1,70 +1,101 @@
 # Integral Render (Radiosity + Galerkin)
 
-## Overview
+This project implements a simple indoor radiosity renderer for a box room with a cube and optional extra rectangular prisms. It assembles a dense form‑factor matrix using a center‑to‑center approximation, solves the radiosity system with a P0 (per‑patch constant) Galerkin discretization, and renders with a small CPU raycaster.
 
-This project implements a simple indoor scene renderer based on Radiosity under a Lambertian assumption. Starting from the rendering equation, we use a Galerkin P0 discretization (piecewise constant per patch). The box room (floor, ceiling, four walls) and a cube are tessellated into rectangular patches. A dense form-factor matrix F is assembled with a center-to-center approximation and then corrected with reciprocity (Ai Fij = Aj Fji).
+## Quick Start
 
-- Linear system: with diffuse reflectance rho, we solve (I - diag(rho) F) B = E, where E = pi * Le is the emission vector and B is the radiosity. The per-patch radiance is L = B / pi.
-- Rendering: a simple CPU raycaster with an interior camera analytically intersects the room/cube planes, maps hit points to their patch grids, looks up constant radiance per patch, then applies Reinhard tone mapping and gamma. Exposure and brightness are user-adjustable.
+- Run full pipeline with multiple light scenarios and images:
+  - `python3 main.py`
+  - Outputs: images in `outputs/`, and linear system / solution CSVs in `linear_system_csv/`.
 
-## Run
+- Export linear system from parameters in `setup.py` (CLI):
+  - `python3 linear_system.py`
+  - Outputs: `linear_system_csv/A.csv`, `linear_system_csv/b.csv` (canonical Ax=b) and legacy `M.csv`, `E.csv` (E may contain multiple columns if multiple scenarios).
 
-```bash
-python3 main.py
-```
+- Solve linear system from CSV (CLI):
+  - `python3 solve.py`
+  - Inputs (preferred): `linear_system_csv/A.csv`, `linear_system_csv/b.csv`. Falls back to `M.csv`/`E.csv`.
+  - Outputs: `linear_system_csv/x.csv` (radiosity), `linear_system_csv/L.csv` (radiance).
 
-- Output images: `outputs/radiosity_box_galerkin_out_<scenario>.png`
-- Light scenarios (positions/size/Le) are configured in `main.py` under `scenarios`.
+- Render directly from CSV solution (CLI):
+  - `python3 render.py`
+  - Finds in order (multi-column supported): `L.csv` → `x.csv` → legacy `L_multi.csv`/`B.csv`/`B_multi.csv`. Renders one image per column to `outputs/`.
 
-## Control Image Brightness
+All tunable parameters live in `setup.py`.
 
-`render.render_photo` exposes two parameters (wired in `main.py`):
+## Scripts
 
-- `exposure`: scales scene radiance before tone mapping (camera-like exposure)
-- `brightness`: post–tone-map multiplier (clamped to [0,1])
+- `main.py`
+  - Orchestrates the pipeline by calling the CLIs: export `A.csv`/`b.csv` (and legacy `M.csv`/`E.csv`), solve to `x.csv`/`L.csv`, then render images from CSV.
 
-Example in `main.py`:
+- `linear_system.py` (CLI)
+  - Uses `setup.py` to build the scene and assemble the form‑factor matrix `F`.
+  - Exports canonical `A.csv`/`b.csv`. Also writes legacy `M.csv`/`E.csv` (where `E.csv` may contain multiple columns if multiple scenarios are defined).
 
-```python
-exposure = 10.0
-brightness = 2.2
-```
+- `solve.py` (CLI)
+  - Loads `A.csv`/`b.csv` (or legacy `M.csv`/`E.csv`), solves `Ax=b`.
+  - Saves `x.csv` (radiosity) and `L.csv` (`L=x/π`). Supports multiple right‑hand sides (columns) in `b.csv`.
 
-## Export Linear System to CSV
+- `render.py` (CLI)
+  - Loads the scene geometry from `setup.py` and renders images directly from CSV solutions in `linear_system_csv/` (prefers `L.csv`, supports multiple columns).
 
-From `linear_system.py`:
+- `setup.py`
+  - Central place to edit all parameters: room size, materials, cube/prisms, light scenarios, camera, render resolution, tone mapping.
 
-- `build_system_matrix(F, rho)` returns `M = I - diag(rho) F`
-- `export_system_to_csv(M, E, out_dir)` writes `M.csv` and `E.csv` with headers
+## Parameters (setup.py)
 
-### Multiple Light Scenarios and E-matrix CSV
+- Scene
+  - `BoxDimensions(W, D, H)`: room width, depth, height.
+  - `Materials`: `rho_floor`, `rho_ceiling`, `rho_walls`, `rho_cube` (diffuse reflectance in [0,1]); `Le_light` (emitted radiance of lights).
+  - `CubeParams(size, z0)`: main cube edge length and base height above floor.
+  - `RectPrism(x0,x1,y0,y1,z0,z1)`: extra prisms (axis‑aligned) bounds.
+  - `SceneConfig`: packs the above plus `light_size` and optional `light_positions` (unused when using scenarios), and `extra_prisms`.
 
-- Define multiple light setups in `main.py` (list `scenarios`).
-- The program solves and renders each scenario and saves all emission vectors side-by-side to `linear_system_csv/E_multi.csv` (rows = patches, columns = scenarios).
+- Lights
+  - `light_size=(lx, ly)`: rectangular emitter size on ceiling.
+  - `scenarios`: list of dicts per light setup:
+    - `name`: scenario name; used in file suffixes and CSV headers.
+    - `positions`: list of emitter centers `(x, y)` on ceiling plane.
+    - `size`: optional override for `light_size`.
+    - `Le`: optional override for `materials.Le_light`.
 
-Git ignores generated CSV exports:
+- Camera & Render
+  - `cam_pos`, `cam_look`, `cam_up`: camera position, look‑at point, and world up.
+  - `width`, `height`, `fov_y_deg`: image size and vertical FoV (degrees).
+  - `exposure`, `brightness`: tone mapping controls. Exposure scales scene radiance before Reinhard; brightness is post‑map gain then clamped to [0,1].
 
-```
-linear_system_csv/
-```
+## Outputs
 
-Re-run `main.py` to regenerate.
+- `outputs/*.png`: rendered images from `main.py` or `render.py`.
+- `linear_system_csv/A.csv`, `linear_system_csv/b.csv`: canonical linear system (b may have multiple columns).
+- `linear_system_csv/M.csv`, `linear_system_csv/E.csv`: legacy names for compatibility.
+- `linear_system_csv/x.csv`, `linear_system_csv/L.csv`: solution radiosity and radiance (may be multi‑column if `b.csv` is multi‑column).
+
+## How It Works (Principles)
+
+- Radiosity with Lambertian surfaces (diffuse BRDF `f_r = ρ/π`). We solve for patch radiosity `B` (power per area) and derive radiance `L = B/π`.
+- Galerkin P0 discretization: each surface patch uses a constant basis. The integral equation reduces to a dense linear system `(I - diag(ρ) F) B = E`, where `E = π·Le` on light patches.
+- Form factors `Fij` via center‑to‑center approximation with cosine terms and inverse‑square falloff, then enforce reciprocity `Ai Fij = Aj Fji`.
+- Visibility: simplified — no geometric occlusion term is computed; only cosine sign checks. This yields smooth energy coupling but may miss shadowing and self‑occlusion.
+- Rendering: a CPU raycaster analytically intersects room planes, the main cube, and extra prisms. At the hit point, it maps to the patch grid of that face, looks up the per‑patch `L`, applies Reinhard tone mapping + gamma, and saves the image.
 
 ## Repository Structure
 
 ```
-scene.py           # Scene config, grid generation, Patch, build_scene()
-linear_system.py   # Form-factor assembly, reciprocity, build M, CSV export
-render.py          # Build E/rho, solve radiosity, build L_face, render image
-main.py            # Example: build → assemble → multi-E CSV → solve → render series
-outputs/           # Rendered images (ignored in Git)
-linear_system_csv/ # CSV exports (M/E, plus E_multi.csv) (ignored in Git)
+setup.py            # All parameters (scene, lights, camera, render)
+main.py             # Orchestrates: export Ax=b → solve → render from CSV
+scene.py            # Geometry, grid generation, masks; extra prisms support
+linear_system.py    # Assemble F, reciprocity, export Ax=b (and legacy M/E) (CLI)
+solve.py            # Solve Ax=b from CSV, export x/L (CLI)
+render.py           # Raycast render from CSV solution (CLI)
+requirements.txt    # numpy, matplotlib, tqdm
 ```
 
-## Notes
+## Notes & Tips
 
-- Form factors use a center-to-center approximation with reciprocity enforcement.
-- Dense O(N^2) assembly; increase subdivisions with care.
+- Performance: `F` is dense O(N²). Increase subdivisions cautiously. A progress bar (tqdm) is used when available.
+- Multi‑scenario note: each scenario changes light mask and thus `ρ`, so `M` differs per scenario. `M.csv`/`E.csv` exported by the CLI correspond to the first scenario only.
+- Extending lights: current masks target ceiling rectangles; you can add similar helpers for walls/floor if needed.
 
 ## License
 

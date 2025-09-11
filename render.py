@@ -1,8 +1,10 @@
 import numpy as np  # type: ignore
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 
 from scene import BuiltScene, BoxDimensions
+from scene import build_scene
+from setup import scene_config, cam_pos, cam_look, cam_up, width, height, fov_y_deg, exposure, brightness
 
 EPS = 1e-9
 
@@ -17,6 +19,9 @@ def build_emission_and_reflectance(
         scene.is_light,
         0.0,
         scene.rho,
+    )
+    print(
+        f"[Render] Built E/rho from scene.is_light: light_patches={int(scene.is_light.sum())}, Le={Le_light}"
     )
     return E, rho
 
@@ -37,16 +42,21 @@ def build_emission_and_reflectance_with_mask(
     E = np.zeros(N)
     E[is_light_mask] = np.pi * Le_light
     rho = np.where(is_light_mask, 0.0, scene.rho)
+    print(
+        f"[Render] Built E/rho with custom mask: light_patches={int(is_light_mask.sum())}, Le={Le_light}"
+    )
     return E, rho
 
 
 def solve_radiosity(
     F: np.ndarray, rho: np.ndarray, E: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
+    print(f"[Render] Solving radiosity: N={F.shape[0]}")
     RF = (rho[:, None]) * F
     M = np.eye(F.shape[0]) - RF
     B = np.linalg.solve(M, E)
     L = B / np.pi
+    print("[Render] Solve complete. Returning B and L.")
     return B, L
 
 
@@ -64,6 +74,7 @@ def build_L_face(scene: BuiltScene, L: np.ndarray) -> Dict[str, np.ndarray]:
     L_face: Dict[str, np.ndarray] = {}
     for face_name, sub in scene.sub_by_face.items():
         L_face[face_name] = collect_face_map(face_name, sub)
+    print(f"[Render] Built L_face for {len(L_face)} faces.")
     return L_face
 
 
@@ -88,6 +99,9 @@ def render_photo(
     cube_z0 = scene.cube_bounds["cube_z0"]
     cube_z1 = scene.cube_bounds["cube_z1"]
 
+    print(
+        f"[Render] Rendering image {width}x{height}, fov_y={fov_y_deg}, exposure={exposure}, brightness={brightness}"
+    )
     aspect = width / height
     fov_y = np.deg2rad(fov_y_deg)
     forward = cam_look - cam_pos
@@ -296,7 +310,12 @@ def render_photo(
     Lmax = max([np.max(L_face[k]) for k in L_face.keys()]) + 1e-8
     Lmax *= exposure
 
-    for ypix in range(height):
+    try:
+        from tqdm import tqdm  # type: ignore
+        rows = tqdm(range(height), desc="Rendering", leave=False)
+    except Exception:
+        rows = range(height)
+    for ypix in rows:
         py = 1.0 - 2.0 * (ypix + 0.5) / height
         for xpix in range(width):
             px = 2.0 * (xpix + 0.5) / width - 1.0
@@ -323,3 +342,100 @@ def save_image(img: np.ndarray, out_path: Path) -> None:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.imsave(str(out_path), np.clip(img, 0, 1))
+    print(f"[Render] Saved image to {out_path}")
+
+
+def _load_csv_matrix(path: Path) -> np.ndarray:
+    return np.loadtxt(path, delimiter=",", skiprows=1)
+
+
+def _parse_multi_header_names(path: Path) -> Optional[List[str]]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            header = f.readline().strip()
+        if "columns=|" in header:
+            part = header.split("columns=|")[-1]
+            cols = part.split("|")
+            # last split after trailing | yields ['last','']; drop empties
+            names = [c for c in cols if c]
+            return names
+    except Exception:
+        pass
+    return None
+
+
+def main_from_csv():
+    """Render images by loading radiosity/radiance from CSV.
+
+    Preference order:
+    - L_multi.csv (render each column with names parsed from header)
+    - L.csv (single image)
+    If only B*.csv present, convert to L via division by pi.
+    """
+    csv_dir = Path(__file__).parent / "linear_system_csv"
+    out_dir = Path(__file__).parent / "outputs"
+    scene = build_scene(scene_config)
+
+    # Preferred names
+    L_path = csv_dir / "L.csv"
+    x_path = csv_dir / "x.csv"
+    # Legacy fallbacks
+    B_path = csv_dir / "B.csv"
+    Lm_path = csv_dir / "L_multi.csv"  # still supported
+    Bm_path = csv_dir / "B_multi.csv"
+
+    def render_columns(Lmat: np.ndarray, suffix_names: Optional[List[str]] = None):
+        cols = 1 if Lmat.ndim == 1 else Lmat.shape[1]
+        for k in range(cols):
+            Lvec = Lmat if cols == 1 else Lmat[:, k]
+            L_face = build_L_face(scene, Lvec)
+            img = render_photo(
+                scene=scene,
+                box=scene_config.box,
+                L_face=L_face,
+                width=width,
+                height=height,
+                fov_y_deg=fov_y_deg,
+                cam_pos=cam_pos,
+                cam_look=cam_look,
+                cam_up=cam_up,
+                exposure=exposure,
+                brightness=brightness,
+            )
+            name = f"col{k}" if suffix_names is None else suffix_names[k]
+            save_image(img, out_dir / f"render_from_csv_{name}.png")
+
+    if L_path.exists():
+        print(f"[Render:CLI] Loading L from {L_path}")
+        Lm = _load_csv_matrix(L_path)
+        render_columns(Lm)
+        return
+    if x_path.exists():
+        print(f"[Render:CLI] Loading x from {x_path}")
+        Xm = _load_csv_matrix(x_path)
+        Lm = Xm / np.pi
+        render_columns(Lm)
+        return
+    if Lm_path.exists():
+        print(f"[Render:CLI] Loading L_multi from {Lm_path}")
+        Lm = _load_csv_matrix(Lm_path)
+        names = _parse_multi_header_names(Lm_path) or [f"col{k}" for k in range(Lm.shape[1])]
+        render_columns(Lm, names)
+        return
+    if B_path.exists():
+        print(f"[Render:CLI] Loading B from {B_path}")
+        B = _load_csv_matrix(B_path)
+        render_columns(B / np.pi)
+        return
+    if Bm_path.exists():
+        print(f"[Render:CLI] Loading B_multi from {Bm_path}")
+        Bm = _load_csv_matrix(Bm_path)
+        names = _parse_multi_header_names(Bm_path) or [f"col{k}" for k in range(Bm.shape[1])]
+        render_columns(Bm / np.pi, names)
+        return
+
+    raise FileNotFoundError("No L*.csv or B*.csv found in linear_system_csv")
+
+
+if __name__ == "__main__":
+    main_from_csv()

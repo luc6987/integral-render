@@ -174,6 +174,7 @@ class PrismBounds:
 
 def build_scene(config: SceneConfig) -> BuiltScene:
     W, D, H = config.box.W, config.box.D, config.box.H
+    print(f"[Scene] Building scene: W={W}, D={D}, H={H}")
     rho_floor = config.materials.rho_floor
     rho_ceiling = config.materials.rho_ceiling
     rho_walls = config.materials.rho_walls
@@ -381,6 +382,7 @@ def build_scene(config: SceneConfig) -> BuiltScene:
     prisms: List[PrismBounds] = []
     prism_bounds_map: Dict[str, PrismBounds] = {}
     if config.extra_prisms:
+        print(f"[Scene] Adding {len(config.extra_prisms)} extra prisms...")
         for k, rp in enumerate(config.extra_prisms):
             name = f"prism{k}"
             pb = PrismBounds(name=name, x0=rp.x0, x1=rp.x1, y0=rp.y0, y1=rp.y1, z0=rp.z0, z1=rp.z1)
@@ -481,6 +483,7 @@ def build_scene(config: SceneConfig) -> BuiltScene:
     areas = np.array([p.area for p in patches])
     rho_arr = np.array([p.rho for p in patches])
     is_light_arr = np.array([p.is_light for p in patches])
+    print(f"[Scene] Total patches: {len(patches)}")
 
     sub_by_face = {
         "floor": sub_floor,
@@ -547,6 +550,7 @@ def compute_ceiling_light_mask(
         for (cx, cy) in light_positions
     ]
     is_light = np.zeros(scene.centers.shape[0], dtype=bool)
+    count = 0
     for idx, p in enumerate(scene.patches):
         if p.face != "ceiling":
             continue
@@ -554,5 +558,7 @@ def compute_ceiling_light_mask(
         for x0, x1, y0, y1 in rects:
             if x0 <= x <= x1 and y0 <= y <= y1:
                 is_light[idx] = True
+                count += 1
                 break
+    print(f"[Scene] Computed ceiling light mask: {count} light patches.")
     return is_light
