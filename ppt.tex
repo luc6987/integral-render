@@ -1,0 +1,173 @@
+% Compile with: xelatex main && xelatex main  (or use latexmk)
+\documentclass[10pt,aspectratio=169]{beamer}
+
+% ---- Theme & look ----
+\usetheme[numbering=fraction,progressbar=frametitle]{metropolis} % modern clean theme
+\metroset{block=fill, titleformat frame=smallcaps, sectionpage=progressbar, numbering=fraction}
+
+% ---- Language & fonts (Chinese + Latin, use XeLaTeX) ----
+\usepackage[UTF8]{ctex}            % Chinese support
+\usepackage{fontspec}
+
+% ---- Common packages ----
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{physics}
+\usepackage{siunitx}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{tabularx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage[ruled,vlined]{algorithm2e}
+\usepackage{listings}
+\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,frame=single}
+
+% ---- Colors (brand-ish) ----
+\definecolor{XBlue}{HTML}{2E77BB}
+\definecolor{XGold}{HTML}{C7A008}
+% 新增：确保整体是白底黑字，避免整页发灰
+\setbeamercolor{background canvas}{bg=white}
+% 恢复主题细节配色
+
+
+\setbeamercolor{title}{fg=black}
+\setbeamercolor{block body}{bg=XBlue!5}
+
+% ---- Meta ----
+\title[短标题]{Raytracing with Radiocity and Galerkin Method}
+\author[Your Name]{Yuguang Yao\\\small École Polytechnique}
+
+
+% Optional: section table of contents at each section start
+% 修复：限制 dark 背景只用于该帧，之后恢复 light
+
+
+% ---- Document ----
+\begin{document}
+
+% Title page
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+
+
+\begin{frame}{问题背景}
+    母方程:
+$$
+\underbrace{L_o(x,\omega_o)}_{\text{出射辐亮度}}
+=
+\underbrace{L_e(x,\omega_o)}_{\text{自发光}}
++\;
+\int_{\Omega^+}
+\underbrace{f_r(x,\omega_i,\omega_o)}_{\text{BRDF}}
+\;
+\underbrace{L_i(x,\omega_i)}_{\text{入射辐亮度}}
+\;
+\underbrace{(\omega_i\!\cdot\!n)}_{\text{余弦项}}
+\;d\omega_i
+$$
+
+\begin{itemize}
+    \item $L$：辐亮度 Radiance，单位 $W\,m^{-2}\,sr^{-1}$（“每面积每立体角的光功率密度”）。
+    \item $f_r$：BRDF，单位 $sr^{-1}$；守恒要求 $\int_{\Omega^+} f_r(\omega_i,\omega_o)(\omega_i\!\cdot\!n)\,d\omega_i \le 1$。
+    \item $(\omega_i\!\cdot\!n)$：余弦项，体现“斜着来的光有效面积更小”。
+    \item $\Omega^+$：法线半球。
+\end{itemize}
+\end{frame}
+
+
+
+\begin{frame}{Radiosity}
+    积分方程:
+$$
+L_o(x,\omega_o)=L_e(x,\omega_o)
++\int_{A} f_r(x,\omega_i,\omega_o)\,L_o(y,-\omega_i)\,G(x,y)\,V(x,y)\,dA_y
+$$
+
+\begin{itemize}
+    \item $V(x,y)\in\{0,1\}$：可见性。
+    \item $G(x,y)=\dfrac{(\omega_i\!\cdot\!n_x)(-\omega_i\!\cdot\!n_y)}{\|x-y\|^2}$：距离衰减+余弦。
+    \item $\omega_i=\dfrac{y-x}{\|y-x\|}$：从 $x$ 指向 $y$ 的方向。
+    \item $f_r(x,\omega_i,\omega_o)=\frac{\rho}{\pi}$:漫反射.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Galerkin Method}
+   Galerkin 方法:
+  $$
+  \quad u(x)-\lambda\!\int K(x,t)u(t)\,dt=f(x).
+  $$
+
+  选一组基函数 $\{\phi_i\}_{i=1}^n$，令未知近似
+
+  $$
+  u_n(x)=\sum_i c_i\,\phi_i(x).
+  $$
+
+  要求残差 $r=u_n-\lambda K[u_n]-f$ 对每个基函数正交：
+
+  $$
+  \langle r,\phi_j\rangle = 0\ \Rightarrow\ 
+  \sum_i \big(\langle \phi_i,\phi_j\rangle -\lambda\langle K[\phi_i],\phi_j\rangle\big)c_i = \langle f,\phi_j\rangle.
+  $$
+  得到一个全局线性方程组 $A c = b$.
+
+\end{frame}
+
+\begin{frame}{Radiocity + Galerkin}
+    Radiocity + Galerkin:
+    P0基：每个面片 $A_i$ 上 $\phi_i(x)=\mathbf{1}_{A_i}(x)$。
+    \begin{itemize}
+        \item 方程：$B = E + \rho K[B]$，核 $K(x,y)=G(x,y)V(x,y)$。
+        \item 取基 $\{\phi_i\}$，Galerkin：$\langle \phi_j, B\rangle = \langle \phi_j, E\rangle + \rho \langle \phi_j, K[B]\rangle$。
+        \item 写成矩阵：$(M - \rho A) c = b$，其中
+        \begin{itemize}
+            \item $M_{ji}=\langle \phi_j,\phi_i\rangle$（P0 时 $=A_j\delta_{ij}$）；
+            \item $A_{ji}=\int\!\!\int \phi_j(x)K(x,y)\phi_i(y)\,dA_x dA_y$；
+            \item $b_j=\langle \phi_j,E\rangle$。
+        \end{itemize}
+    \end{itemize}
+  归一化后就是 $(I-\rho F)B=E$。
+
+\end{frame}
+
+\begin{frame}{feasibility}
+patches 数量在$N\sim 10^3$级别时,效果?
+
+scene: 6个面的房间($A\sim 5$),1个光源面(1*1),一个五个面立方体(a=1)
+
+patch density: $A_i\sim \rho$
+
+$10*A^2\rho \sim 10^3\rightarrow \rho \sim 4$
+
+因此每个面片的长度大概在 $0.25m$ 级别.
+\end{frame}
+
+\begin{frame}{可视化}
+渲染时每个像素:
+$$
+\text{Pixel} \propto \int_{\lambda}\!\!\int_{t}\!\!\int_{\mathcal{A}_{\text{aperture}}}\!\!\int_{\mathcal{P}_{\text{pixel}}}
+L_o\!\big(x(\xi),\omega(\xi),\lambda,t\big)\;
+W_{\text{pix}}(\xi_{\text{pixel}})\, d\xi_{\text{pixel}}\, d\xi_{\text{aperture}}\, dt\, S(\lambda)\, d\lambda .
+$$
+
+
+\begin{itemize}
+    \item $W_{\text{pix}}$：像素重建滤波（盒/三角/Tent、Mitchell、Lanczos）。
+    \item $S(\lambda)$：光谱到感光元的敏感度（或 XYZ CMF / 显示原色敏感度）。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{可视化}
+    \begin{figure}
+        \centering
+        \includegraphics[height=0.8\textheight]{outputs/Left_up_5560.png}
+        \caption{$N_{Patch}=3129$}
+    \end{figure}
+\end{frame}
+
+
+
+% ---- End ----
+\end{document}
