@@ -391,3 +391,36 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         sub_by_face=sub_by_face,
         cube_bounds=cube_bounds,
     )
+
+
+def compute_ceiling_light_mask(
+    scene: BuiltScene,
+    light_positions: Sequence[Tuple[float, float]],
+    light_size: Tuple[float, float],
+) -> np.ndarray:
+    """Return a boolean mask over patches for ceiling lights defined by rectangles.
+
+    Each light is an axis-aligned rectangle on the ceiling plane, specified by
+    its center (cx, cy) in room coordinates and size (lx, ly). Any ceiling patch
+    whose center lies inside any rectangle is considered a light.
+
+    This does not mutate the scene. It allows building multiple E vectors on a
+    fixed scene without re-assembling the form-factor matrix.
+    """
+    if not light_positions:
+        return np.zeros(scene.centers.shape[0], dtype=bool)
+    lx, ly = light_size
+    rects = [
+        (cx - lx / 2.0, cx + lx / 2.0, cy - ly / 2.0, cy + ly / 2.0)
+        for (cx, cy) in light_positions
+    ]
+    is_light = np.zeros(scene.centers.shape[0], dtype=bool)
+    for idx, p in enumerate(scene.patches):
+        if p.face != "ceiling":
+            continue
+        x, y = float(p.center[0]), float(p.center[1])
+        for x0, x1, y0, y1 in rects:
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                is_light[idx] = True
+                break
+    return is_light

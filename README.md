@@ -13,8 +13,8 @@ This project implements a simple indoor scene renderer based on Radiosity under 
 python3 main.py
 ```
 
-- Output image: `outputs/radiosity_box_galerkin_out.png`
-- Light position is configured in `main.py` via `light_positions`.
+- Output images: `outputs/radiosity_box_galerkin_out_<scenario>.png`
+- Light scenarios (positions/size/Le) are configured in `main.py` under `scenarios`.
 
 ## Control Image Brightness
 
@@ -37,6 +37,11 @@ From `linear_system.py`:
 - `build_system_matrix(F, rho)` returns `M = I - diag(rho) F`
 - `export_system_to_csv(M, E, out_dir)` writes `M.csv` and `E.csv` with headers
 
+### Multiple Light Scenarios and E-matrix CSV
+
+- Define multiple light setups in `main.py` (list `scenarios`).
+- The program solves and renders each scenario and saves all emission vectors side-by-side to `linear_system_csv/E_multi.csv` (rows = patches, columns = scenarios).
+
 Git ignores generated CSV exports:
 
 ```
@@ -51,9 +56,9 @@ Re-run `main.py` to regenerate.
 scene.py           # Scene config, grid generation, Patch, build_scene()
 linear_system.py   # Form-factor assembly, reciprocity, build M, CSV export
 render.py          # Build E/rho, solve radiosity, build L_face, render image
-main.py            # Example: build → assemble → export CSV → solve → render
+main.py            # Example: build → assemble → multi-E CSV → solve → render series
 outputs/           # Rendered images (ignored in Git)
-linear_system_csv/ # CSV exports of M and E (ignored in Git)
+linear_system_csv/ # CSV exports (M/E, plus E_multi.csv) (ignored in Git)
 ```
 
 ## Notes

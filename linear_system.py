@@ -87,3 +87,34 @@ def export_system_to_csv(M: np.ndarray, E: np.ndarray, out_dir: Path) -> Dict[st
     np.savetxt(M_path, M, delimiter=",", header=mh, comments="")
     np.savetxt(e_path, E, delimiter=",", header=eh, comments="")
     return {"M": M_path, "E": e_path}
+
+
+def export_multiple_E_to_csv(
+    E_list: "list[np.ndarray]",
+    names: "list[str]",
+    out_path: Path,
+) -> Path:
+    """Export multiple E vectors side-by-side into a single CSV file.
+
+    Rows correspond to patches, columns to scenarios.
+    Header encodes number of patches and scenario names.
+    """
+    if len(E_list) == 0:
+        raise ValueError("E_list is empty")
+    N = E_list[0].shape[0]
+    for idx, E in enumerate(E_list):
+        if E.shape[0] != N:
+            raise ValueError(f"E_list[{idx}] length mismatch: {E.shape[0]} != {N}")
+    if len(names) != len(E_list):
+        raise ValueError("names and E_list lengths differ")
+    # Stack as N x K (columns are scenarios)
+    K = len(E_list)
+    M = np.zeros((N, K), dtype=float)
+    for k, E in enumerate(E_list):
+        M[:, k] = E
+    header = (
+        f"E_multi: patches={N}, scenarios={K}; columns=|" + "|".join(names) + "|"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savetxt(out_path, M, delimiter=",", header=header, comments="")
+    return out_path

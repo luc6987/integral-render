@@ -1,10 +1,22 @@
 import numpy as np  # type: ignore
 from pathlib import Path
 
-from scene import SceneConfig, BoxDimensions, Materials, build_scene
-from linear_system import build_linear_system, build_system_matrix, export_system_to_csv
+from scene import (
+    SceneConfig,
+    BoxDimensions,
+    Materials,
+    build_scene,
+    compute_ceiling_light_mask,
+)
+from linear_system import (
+    build_linear_system,
+    build_system_matrix,
+    export_system_to_csv,
+    export_multiple_E_to_csv,
+)
 from render import (
     build_emission_and_reflectance,
+    build_emission_and_reflectance_with_mask,
     solve_radiosity,
     build_L_face,
     render_photo,
@@ -22,59 +34,102 @@ def main():
         Le_light=10.0,
     )
 
+    # Base light size (per scenario can override)
     light_size = (1.0, 1.0)
-    # Move light to room's left-up corner (assume world origin at floor (0,0))
-    light_positions = [(0.5, D - 0.5)]
 
     config = SceneConfig(
         box=BoxDimensions(W=W, D=D, H=H),
         materials=materials,
+        # Scene built without fixed lights; scenarios specify masks dynamically
         light_size=light_size,
-        light_positions=light_positions,
+        light_positions=None,
     )
 
     scene = build_scene(config)
 
     F, _ = build_linear_system(scene)
 
-    E, rho = build_emission_and_reflectance(scene, Le_light=materials.Le_light)
-    M = build_system_matrix(F, rho)
-
-    # Export linear system to CSV in a new folder
-    csv_dir = Path(__file__).parent / "linear_system_csv"
-    export_system_to_csv(M, E, csv_dir)
-
-    # Solve and render
-    _, L = solve_radiosity(F, rho, E)
-
-    L_face = build_L_face(scene, L)
+    # Define a series of light scenarios
+    scenarios = [
+        {
+            "name": "corner_left_up",
+            "positions": [(0.5, D - 0.5)],
+            "size": light_size,
+            "Le": materials.Le_light,
+        },
+        {
+            "name": "center",
+            "positions": [(W / 2.0, D / 2.0)],
+            "size": light_size,
+            "Le": materials.Le_light,
+        },
+        {
+            "name": "two_lights",
+            "positions": [(0.8, 0.8), (W - 0.8, D - 0.8)],
+            "size": (0.8, 0.8),
+            "Le": materials.Le_light,
+        },
+    ]
 
     cam_pos = np.array([0, 0, H / 2.0])
     cam_look = np.array([W, D, H / 3.0]) - np.array([0, 0, H / 2.0])
     cam_up = np.cross(np.cross(cam_look, np.array([0, 0, 1])), cam_look)
 
-    # Adjust these to control image brightness directly
-    exposure = 10.0  # scales scene radiance before tone mapping
-    brightness = 2.2  # post-tone-map multiplier (clamped)
-
-    img = render_photo(
-        scene=scene,
-        box=config.box,
-        L_face=L_face,
-        width=800,
-        height=600,
-        fov_y_deg=40.0,
-        cam_pos=cam_pos,
-        cam_look=cam_look,
-        cam_up=cam_up,
-        exposure=exposure,
-        brightness=brightness,
-    )
+    exposure = 10.0
+    brightness = 2.2
 
     out_dir = Path(__file__).parent / "outputs"
-    out_path = out_dir / "radiosity_box_galerkin_out.png"
-    save_image(img, out_path)
-    print(f"Saved image: {out_path}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Collect all E vectors for a combined CSV
+    all_E = []
+    all_names = []
+
+    for sc in scenarios:
+        name = sc["name"]
+        positions = sc["positions"]
+        size = sc.get("size", light_size)
+        Le = sc.get("Le", materials.Le_light)
+
+        is_light_mask = compute_ceiling_light_mask(
+            scene, light_positions=positions, light_size=size
+        )
+        E, rho = build_emission_and_reflectance_with_mask(
+            scene, Le_light=Le, is_light_mask=is_light_mask
+        )
+        all_E.append(E)
+        all_names.append(name)
+
+        # Optionally export a single-system CSV for the first scenario
+        if len(all_E) == 1:
+            M = build_system_matrix(F, rho)
+            csv_dir = Path(__file__).parent / "linear_system_csv"
+            export_system_to_csv(M, E, csv_dir)
+
+        # Solve and render image for this scenario
+        _, L = solve_radiosity(F, rho, E)
+        L_face = build_L_face(scene, L)
+        img = render_photo(
+            scene=scene,
+            box=config.box,
+            L_face=L_face,
+            width=800,
+            height=600,
+            fov_y_deg=40.0,
+            cam_pos=cam_pos,
+            cam_look=cam_look,
+            cam_up=cam_up,
+            exposure=exposure,
+            brightness=brightness,
+        )
+        out_path = out_dir / f"radiosity_box_galerkin_out_{name}.png"
+        save_image(img, out_path)
+        print(f"Saved image: {out_path}")
+
+    # Export all E vectors into one CSV with columns as scenarios
+    multi_csv = Path(__file__).parent / "linear_system_csv" / "E_multi.csv"
+    export_multiple_E_to_csv(all_E, all_names, multi_csv)
+    print(f"Saved multi-E CSV: {multi_csv}")
 
 
 if __name__ == "__main__":

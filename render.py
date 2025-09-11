@@ -21,6 +21,25 @@ def build_emission_and_reflectance(
     return E, rho
 
 
+def build_emission_and_reflectance_with_mask(
+    scene: BuiltScene,
+    Le_light: float,
+    is_light_mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Build E and rho given an explicit light mask.
+
+    - E[i] = pi * Le_light for light patches, else 0
+    - rho[i] = 0 for light patches, else scene.rho[i]
+    """
+    N = scene.centers.shape[0]
+    if is_light_mask.shape[0] != N:
+        raise ValueError("is_light_mask length mismatch with scene patches")
+    E = np.zeros(N)
+    E[is_light_mask] = np.pi * Le_light
+    rho = np.where(is_light_mask, 0.0, scene.rho)
+    return E, rho
+
+
 def solve_radiosity(
     F: np.ndarray, rho: np.ndarray, E: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
