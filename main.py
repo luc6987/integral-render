@@ -8,6 +8,7 @@ from scene import (
     build_scene,
     compute_ceiling_light_mask,
     RectPrism,
+    CubeParams,
 )
 from linear_system import (
     build_linear_system,
@@ -38,13 +39,17 @@ def main():
     # Base light size (per scenario can override)
     light_size = (1.0, 1.0)
 
-    # Add four rectangular prisms (varying sizes), same subdivision as cube
+    # Add four rectangular prisms (composition-aware), same subdivision as cube
+    # Guiding ideas: big–medium–small hierarchy, unequal spacing/heights, overlap, no tangents
     prisms = [
-        # Near corners with small offsets, heights vary
-        RectPrism(x0=0.3, x1=0.9, y0=0.3, y1=0.7, z0=1e-3, z1=0.6),
-        RectPrism(x0=W-1.0, x1=W-0.3, y0=0.4, y1=1.2, z0=1e-3, z1=0.9),
-        RectPrism(x0=0.6, x1=1.4, y0=D-1.2, y1=D-0.4, z0=1e-3, z1=0.7),
-        RectPrism(x0=W-1.4, x1=W-0.6, y0=D-1.0, y1=D-0.3, z0=1e-3, z1=1.1),
+        # P0: foreground slender (near camera, left), tall for depth
+        RectPrism(x0=0.5, x1=1.0, y0=0.6, y1=1.1, z0=1e-3, z1=1.4),
+        # P1: mid-right broad low block (secondary mass, avoids central cube)
+        RectPrism(x0=3.4, x1=4.2, y0=1.8, y1=2.5, z0=1e-3, z1=0.6),
+        # P2: back-right slim tall (counterweight, far depth cue)
+        RectPrism(x0=4.1, x1=4.6, y0=4.0, y1=4.6, z0=1e-3, z1=1.8),
+        # P3: back-left small medium height (light anchor, avoids tangents)
+        RectPrism(x0=0.6, x1=1.1, y0=3.8, y1=4.4, z0=1e-3, z1=0.9),
     ]
 
     config = SceneConfig(
@@ -54,11 +59,16 @@ def main():
         light_size=light_size,
         light_positions=None,
         extra_prisms=prisms,
+        cube=CubeParams(size=1.6, z0=1e-3),  # larger main cube for hierarchy
     )
 
+    print("[Main] Start building scene...")
     scene = build_scene(config)
+    print("[Main] Scene built.")
 
+    print("[Main] Building linear system...")
     F, _ = build_linear_system(scene)
+    print("[Main] Linear system built (F, E0)")
 
     # Define a series of light scenarios
     scenarios = [
@@ -96,8 +106,10 @@ def main():
     all_E = []
     all_names = []
 
+    print(f"[Main] Running {len(scenarios)} light scenarios...")
     for sc in scenarios:
         name = sc["name"]
+        print(f"[Main] Scenario: {name}")
         positions = sc["positions"]
         size = sc.get("size", light_size)
         Le = sc.get("Le", materials.Le_light)
@@ -135,12 +147,11 @@ def main():
         )
         out_path = out_dir / f"radiosity_box_galerkin_out_{name}.png"
         save_image(img, out_path)
-        print(f"Saved image: {out_path}")
 
     # Export all E vectors into one CSV with columns as scenarios
     multi_csv = Path(__file__).parent / "linear_system_csv" / "E_multi.csv"
     export_multiple_E_to_csv(all_E, all_names, multi_csv)
-    print(f"Saved multi-E CSV: {multi_csv}")
+    print(f"[Main] Saved multi-E CSV: {multi_csv}")
 
 
 if __name__ == "__main__":
