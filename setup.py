@@ -6,6 +6,7 @@ from src.scene import (
     SceneConfig,
     RectPrism,
     CubeParams,
+    Subdivisions,
 )
 
 # ---- Room dimensions ----
@@ -18,6 +19,18 @@ materials = Materials(
     rho_walls=0.0,
     rho_cube=0.999,
     Le_light=10.0,
+)
+
+# ---- Subdivisions ----
+rhodiv = 10  # density factor for patches
+subdivisions = Subdivisions(
+    floor=(rhodiv * int(W), rhodiv * int(D)),
+    ceiling=(int(W), int(D)),
+    wall_x0=(1, 1),
+    wall_x1=(1, 1),
+    wall_y0=(1, 1),
+    wall_y1=(1, 1),
+    cube=(rhodiv, rhodiv),
 )
 
 # ---- Light defaults ----
@@ -46,6 +59,7 @@ scene_config = SceneConfig(
     light_positions=None,
     extra_prisms=prisms,
     cube=cube,
+    subdivisions=subdivisions,
 )
 
 # ---- Light scenarios ----

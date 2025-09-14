@@ -180,24 +180,15 @@ def build_scene(config: SceneConfig) -> BuiltScene:
     rho_walls = config.materials.rho_walls
     rho_cube = config.materials.rho_cube
 
-    if config.subdivisions is None:
-        rhodiv = 10
-        sub_floor = (rhodiv * int(W), rhodiv * int(D))
-        sub_ceiling = (int(W), int(D))
-        sub_wall_x0 = (1, 1)
-        sub_wall_x1 = (1, 1)
-        sub_wall_y0 = (1, 1)
-        sub_wall_y1 = (1, 1)
-        sub_cube = (rhodiv, rhodiv)
-    else:
-        s = config.subdivisions
-        sub_floor = s.floor
-        sub_ceiling = s.ceiling
-        sub_wall_x0 = s.wall_x0
-        sub_wall_x1 = s.wall_x1
-        sub_wall_y0 = s.wall_y0
-        sub_wall_y1 = s.wall_y1
-        sub_cube = s.cube
+    # Use subdivisions from config (now always provided from setup.py)
+    s = config.subdivisions
+    sub_floor = s.floor
+    sub_ceiling = s.ceiling
+    sub_wall_x0 = s.wall_x0
+    sub_wall_x1 = s.wall_x1
+    sub_wall_y0 = s.wall_y0
+    sub_wall_y1 = s.wall_y1
+    sub_cube = s.cube
 
     cube_size = config.cube.size
     cube_z0 = config.cube.z0
