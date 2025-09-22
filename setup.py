@@ -17,13 +17,17 @@ materials = Materials(
     rho_floor=0.3,
     rho_ceiling=0.0,
     rho_walls=0.0,
-    rho_cube=0.999,
+    rho_cube=0.5,
     Le_light=10.0,
 )
 
 # ---- Basis function type ----
 # Options: "P0" (constant per patch) or "P1" (Q1 bilinear per element)
 basis_type = "P1"  # Change to "P1" for Q1 bilinear basis
+
+# ---- Visibility options ----
+# If True, skip computing geometric occlusion and use V(x,y)=1 (except diagonal)
+skip_visibility = False
 
 # ---- Subdivisions ----
 rhodiv = 4  # density factor for patches
@@ -43,7 +47,7 @@ light_size = (1.0, 1.0)
 # ---- Composition-aware extra prisms (same subdivision as cube) ----
 prisms = [
     # P0: foreground slender (near camera, left), tall for depth
-    RectPrism(x0=1.5, x1=2.0, y0=0.6, y1=1.1, z0=1e-3, z1=1.5),
+    RectPrism(x0=1.4, x1=2.0, y0=0.6, y1=1.1, z0=1e-3, z1=1.5),
     # P1: mid-right broad low block (secondary mass)
     RectPrism(x0=3.4, x1=4.2, y0=1.8, y1=2.5, z0=1e-3, z1=0.6),
     # P2: back-right slim tall (counterweight, far depth cue)
@@ -53,7 +57,7 @@ prisms = [
 ]
 
 # ---- Main cube ----
-cube = CubeParams(size=1.6, z0=1e-3)
+cube = CubeParams(size=1.0, z0=1e-3)
 
 # ---- Scene configuration (no fixed lights; scenarios below will define masks) ----
 scene_config = SceneConfig(
@@ -88,5 +92,5 @@ fov_y_deg = 55.0
 exposure = 10.0
 brightness = 2.2
 # Percentile for tone mapping white point (e.g., 99.0 means 99th percentile)
-tone_white_percentile = 99.5
+tone_white_percentile = 99.7
 

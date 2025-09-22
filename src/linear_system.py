@@ -1,12 +1,13 @@
 import numpy as np  # type: ignore
 from pathlib import Path
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 
 from .scene import BuiltScene, P1Element
 from .scene import build_scene, compute_ceiling_light_mask
-from setup import scene_config, scenarios, light_size, materials
+from .visibility import get_or_build_visibility, is_segment_blocked
+from setup import scene_config, scenarios, light_size, materials, skip_visibility
 try:
     from tqdm import tqdm  # type: ignore
 except Exception:  # pragma: no cover
@@ -14,7 +15,10 @@ except Exception:  # pragma: no cover
 
 
 def assemble_form_factor_matrix(
-    centers: np.ndarray, normals: np.ndarray, areas: np.ndarray
+    centers: np.ndarray,
+    normals: np.ndarray,
+    areas: np.ndarray,
+    V: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     N = centers.shape[0]
     EPS = 1e-9
@@ -35,9 +39,10 @@ def assemble_form_factor_matrix(
         vis = (cos_i > 0) & (cos_j > 0)
         vis[i] = False
         contrib = np.zeros(N)
-        contrib[vis] = (
-            (cos_i[vis] * cos_j[vis]) / (np.pi * r2[vis]) * areas[vis]
-        )
+        base = (cos_i * cos_j) / (np.pi * r2) * areas
+        if V is not None:
+            base = base * V[i, :]
+        contrib[vis] = base[vis]
         F[i, :] = contrib
     return F
 
@@ -62,10 +67,17 @@ def build_linear_system(scene: BuiltScene) -> Tuple[np.ndarray, np.ndarray]:
     
     # P0 implementation (original)
     print("[LinearSystem] Building P0 linear system (F, E)...")
+    # Visibility matrix shared across bases
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    cache_dir = PROJECT_ROOT / "linear_system_csv"
+    Vmat, vtag, vpath = get_or_build_visibility(
+        scene, cache_dir, skip=skip_visibility, basis_type=scene.basis_type
+    )
     F = assemble_form_factor_matrix(
         scene.centers,
         scene.normals,
         scene.areas,
+        V=Vmat,
     )
     enforce_reciprocity(F, scene.areas)
     E = np.zeros(scene.centers.shape[0])
@@ -155,7 +167,8 @@ def _compute_single_element_pair_kernel(args):
 def compute_geometric_kernel_element_pair(
     element_i: P1Element, 
     element_j: P1Element,
-    n_quad: int = 2
+    n_quad: int = 2,
+    scene: Optional[BuiltScene] = None,
 ) -> np.ndarray:
     """Compute 4x4 geometric kernel matrix between two Q1 elements."""
     K = np.zeros((4, 4))
@@ -211,8 +224,10 @@ def compute_geometric_kernel_element_pair(
             cos_i = np.dot(r_vec, n_i) / r
             cos_j = -np.dot(r_vec, n_j) / r
             
-            # Visibility (simplified - no geometric occlusion)
-            V = 1.0 if (cos_i > 0 and cos_j > 0) else 0.0
+            Vflag = 1.0 if (cos_i > 0 and cos_j > 0) else 0.0
+            if Vflag > 0.0 and scene is not None:
+                if is_segment_blocked(scene, x_q, y_p):
+                    Vflag = 0.0
             
             # Geometric kernel
             G = (cos_i * cos_j) / (np.pi * r2)
@@ -224,7 +239,7 @@ def compute_geometric_kernel_element_pair(
             # Accumulate into kernel matrix
             for a in range(4):
                 for b in range(4):
-                    K[a, b] += N_i[a] * G * V * N_j[b] * w_q * w_p * J_i * J_j
+                    K[a, b] += N_i[a] * G * Vflag * N_j[b] * w_q * w_p * J_i * J_j
     
     return K
 
@@ -270,6 +285,13 @@ def assemble_p1_geometric_kernel(scene: BuiltScene, n_workers: int = None) -> np
     
     print(f"[LinearSystem] Assembling P1 geometric kernel ({n_nodes}x{n_nodes})...")
     
+    # Prepare visibility matrix (shared for basis types)
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    cache_dir = PROJECT_ROOT / "linear_system_csv"
+    Vmat, vtag, vpath = get_or_build_visibility(
+        scene, cache_dir, skip=skip_visibility, basis_type=scene.basis_type
+    )
+
     # Prepare element pairs for parallel computation
     element_pairs = []
     for i, elem_i in enumerate(scene.elements):
@@ -289,12 +311,14 @@ def assemble_p1_geometric_kernel(scene: BuiltScene, n_workers: int = None) -> np
         for i, (elem_i, elem_j, n_quad) in enumerate(element_pairs):
             if tqdm is not None and i % 100 == 0:
                 tqdm.write(f"Processing element pair {i}/{total_pairs}")
-            K_elem = compute_geometric_kernel_element_pair(elem_i, elem_j, n_quad)
+            K_elem = compute_geometric_kernel_element_pair(elem_i, elem_j, n_quad, scene=scene)
             
             # Assemble into global matrix
             for a, node_a in enumerate(elem_i.nodes):
                 for b, node_b in enumerate(elem_j.nodes):
-                    F[node_a.global_id, node_b.global_id] += K_elem[a, b]
+                    F[node_a.global_id, node_b.global_id] += (
+                        K_elem[a, b] * Vmat[node_a.global_id, node_b.global_id]
+                    )
     else:
         print(f"[LinearSystem] Using {n_workers} parallel workers...")
         
@@ -349,30 +373,63 @@ def assemble_p1_geometric_kernel(scene: BuiltScene, n_workers: int = None) -> np
     return F
 
 
-def build_linear_system_p1(scene: BuiltScene, n_workers: int = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Build P1 linear system: (M - RF) b = f where M is mass, R is albedo, F is geometric kernel."""
-    print("[LinearSystem] Building P1 linear system...")
-    
-    # Assemble matrices
-    M = assemble_p1_mass_matrix(scene)
-    R = assemble_p1_albedo_matrix(scene)
-    F = assemble_p1_geometric_kernel(scene, n_workers)
-    
-    # System matrix: A = M - R*F
-    A = M - R @ F
-    
-    # Right-hand side: f = M * E (where E is emission)
+def assemble_p1_mass_lumped(scene: BuiltScene) -> np.ndarray:
+    """Row-sum lumping of the P1 mass matrix.
+
+    Returns m (shape [n_nodes]), where M_lumped = diag(m).
+    """
     n_nodes = len(scene.nodes)
-    E = np.zeros(n_nodes)
-    
-    # Set emission for light nodes
-    for node in scene.nodes:
-        if node.is_light:
-            E[node.global_id] = np.pi * 10.0  # Le_light from materials
-    
-    f = M @ E
-    
-    print(f"[LinearSystem] Built P1 system: A={A.shape}, f={f.shape}")
+    m = np.zeros(n_nodes, dtype=np.float64)
+    for element in scene.elements:
+        M_elem = compute_element_mass_matrix(element)
+        # add row sums of element mass into node diagonals
+        row_sums = np.sum(M_elem, axis=1)
+        for i_local, node_i in enumerate(element.nodes):
+            m[node_i.global_id] += row_sums[i_local]
+    return m
+
+
+def _build_p1_lumped_system(scene: BuiltScene) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build lumped P1 components: diag(m), R_lumped = diag(rho*m), and F.
+
+    Returns (m, rdiag, F) so that A = diag(m) - diag(rdiag) @ F.
+    """
+    # Lumped mass diag
+    m = assemble_p1_mass_lumped(scene)
+    # Lumped reflectance diag: rho per node times lumped mass
+    rho_node = np.array([node.rho for node in scene.nodes], dtype=np.float64)
+    rdiag = rho_node * m
+    # Geometric kernel unchanged
+    F = assemble_p1_geometric_kernel(scene)
+    return m, rdiag, F
+
+
+def _build_p1_lumped_rhs(scene: BuiltScene, *, positions, size, Le) -> np.ndarray:
+    """Build lumped RHS: f = diag(m) @ E_node, where E_node at light nodes = pi*Le."""
+    m = assemble_p1_mass_lumped(scene)
+    mask = _compute_p1_light_mask(scene, positions, size)
+    E_node = np.zeros(len(scene.nodes), dtype=np.float64)
+    E_node[mask] = np.pi * Le
+    return m * E_node
+
+
+def build_linear_system_p1(scene: BuiltScene, n_workers: int = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Build P1 linear system with mass-lumping: (diag(m) - diag(rho*m) F) b = diag(m) E.
+
+    This localizes emission on non-reflective ceilings and reduces artificial diffusion.
+    """
+    print("[LinearSystem] Building P1 linear system (lumped mass)...")
+    # Lumped components
+    m = assemble_p1_mass_lumped(scene)
+    rho_node = np.array([node.rho for node in scene.nodes], dtype=np.float64)
+    rdiag = rho_node * m
+    F = assemble_p1_geometric_kernel(scene, n_workers)
+    # System matrix A = diag(m) - diag(rdiag) @ F
+    A = np.diag(m) - (rdiag[:, None] * F)
+    # RHS: f = diag(m) @ E_node (built later per scenario in export func),
+    # but for completeness we keep zero here; actual b's built in export.
+    f = np.zeros(len(scene.nodes), dtype=np.float64)
+    print(f"[LinearSystem] Built P1 (lumped) system: A={A.shape}, f={f.shape}")
     return A, f
 
 
@@ -510,10 +567,10 @@ def _integrate_p1_rhs_for_lights(scene: BuiltScene, light_positions, light_size,
 
 def _build_M_E_for_scenario(scene: BuiltScene, F: np.ndarray, *, positions, size, Le) -> Tuple[np.ndarray, np.ndarray]:
     if scene.basis_type == "P1":
-        # System matrix already assembled in F (actually A)
+        # F is A (already lumped) from build_linear_system_p1
         A = F
-        # Proper RHS by integrating basis over light area
-        f = _integrate_p1_rhs_for_lights(scene, positions, size, Le)
+        # Lumped RHS per scenario
+        f = _build_p1_lumped_rhs(scene, positions=positions, size=size, Le=Le)
         return A, f
     
     # P0 implementation (original)
