@@ -71,6 +71,10 @@ def solve_radiosity(
 
 
 def build_L_face(scene: BuiltScene, L: np.ndarray) -> Dict[str, np.ndarray]:
+    if scene.basis_type == "P1":
+        return build_L_face_p1(scene, L)
+    
+    # P0 implementation (original)
     def collect_face_map(face_name: str, sub: Tuple[int, int]) -> np.ndarray:
         nx, ny = sub
         V = np.zeros((ny, nx))
@@ -85,6 +89,34 @@ def build_L_face(scene: BuiltScene, L: np.ndarray) -> Dict[str, np.ndarray]:
     for face_name, sub in scene.sub_by_face.items():
         L_face[face_name] = collect_face_map(face_name, sub)
     print(f"[Render] Built L_face for {len(L_face)} faces.")
+    return L_face
+
+
+def build_L_face_p1(scene: BuiltScene, L: np.ndarray) -> Dict[str, np.ndarray]:
+    """Build per-face node-value grids for P1.
+
+    For each face with subdivision (nx, ny), we return an array of shape (ny+1, nx+1)
+    where each entry is the radiance value at that P1 node. Rendering will perform
+    bilinear sampling at the hit uv.
+    """
+    def build_face_node_grid(face_name: str, sub: Tuple[int, int]) -> np.ndarray:
+        nx, ny = sub
+        if nx < 1 or ny < 1:
+            return np.zeros((ny + 1, nx + 1))
+        face_nodes = [node for node in (scene.nodes or []) if node.face == face_name]
+        node_id_grid = -np.ones((ny + 1, nx + 1), dtype=np.int64)
+        for node in face_nodes:
+            ii, jj = node.ij
+            if 0 <= ii <= nx and 0 <= jj <= ny:
+                node_id_grid[jj, ii] = node.global_id
+        if (node_id_grid < 0).any():
+            return np.zeros((ny + 1, nx + 1))
+        return L[node_id_grid]
+
+    L_face: Dict[str, np.ndarray] = {}
+    for face_name, sub in scene.sub_by_face.items():
+        L_face[face_name] = build_face_node_grid(face_name, sub)
+    print(f"[Render] Built P1 node grids for {len(L_face)} faces.")
     return L_face
 
 
@@ -263,7 +295,7 @@ def render_photo(
                     tmin, hit_face, hit_p = t, "wall_y1", p
         return tmin, hit_face, hit_p
 
-    def face_ij(face: str, p: np.ndarray) -> Tuple[int, int]:
+    def face_uv(face: str, p: np.ndarray) -> Tuple[float, float, int, int]:
         if face == "floor":
             nx, ny = scene.sub_by_face["floor"]
             u, v = p[0] / W, p[1] / D
@@ -297,7 +329,6 @@ def render_photo(
         elif face in scene.prism_bounds_map:
             nx, ny = scene.sub_by_face[face]
             pb = scene.prism_bounds_map[face]
-            # suffix: last token after '_'
             suff = face.rsplit("_", 1)[-1]
             if suff in ("top", "bottom"):
                 u = (p[0] - pb.x0) / (pb.x1 - pb.x0)
@@ -309,16 +340,42 @@ def render_photo(
                 u = (p[0] - pb.x0) / (pb.x1 - pb.x0)
                 v = (p[2] - pb.z0) / (pb.z1 - pb.z0)
             else:
-                return (0, 0)
+                return (0.0, 0.0, 1, 1)
         else:
-            return (0, 0)
-        i = min(nx - 1, max(0, int(u * nx)))
-        j = min(ny - 1, max(0, int(v * ny)))
-        return (i, j)
+            return (0.0, 0.0, 1, 1)
+        # Clamp uv to [0,1)
+        u = max(0.0, min(1.0 - 1e-9, float(u)))
+        v = max(0.0, min(1.0 - 1e-9, float(v)))
+        return (u, v, nx, ny)
 
-    # Compute exposure-adjusted Lmax for tone mapping
-    Lmax = max([np.max(L_face[k]) for k in L_face.keys()]) + 1e-8
-    Lmax *= exposure
+    def sample_L(face: str, hp: np.ndarray) -> float:
+        u, v, nx, ny = face_uv(face, hp)
+        if scene.basis_type == "P1":
+            # Bilinear on node grid (ny+1, nx+1)
+            grid = L_face[face]
+            # Convert to node indices
+            x = u * nx
+            y = v * ny
+            i0 = min(nx - 1, max(0, int(np.floor(x))))
+            j0 = min(ny - 1, max(0, int(np.floor(y))))
+            du = x - i0
+            dv = y - j0
+            L00 = grid[j0 + 0, i0 + 0]
+            L10 = grid[j0 + 0, i0 + 1]
+            L11 = grid[j0 + 1, i0 + 1]
+            L01 = grid[j0 + 1, i0 + 0]
+            return (1 - du) * (1 - dv) * L00 + du * (1 - dv) * L10 + du * dv * L11 + (1 - du) * dv * L01
+        else:
+            # P0: piecewise constant per patch
+            i = min(nx - 1, max(0, int(u * nx)))
+            j = min(ny - 1, max(0, int(v * ny)))
+            return float(L_face[face][j, i])
+
+    # Tone mapping reference
+    Lmax = 0.0
+    for k, arr in L_face.items():
+        Lmax = max(Lmax, float(np.max(arr)))
+    Lmax = (Lmax + 1e-8) * exposure
 
     try:
         from tqdm import tqdm  # type: ignore
@@ -338,8 +395,7 @@ def render_photo(
             t, face, hp = intersect_scene(cam_pos, dir_cam)
             if face is None or not np.isfinite(t):
                 continue
-            i, j = face_ij(face, hp)
-            Lhit = L_face[face][j, i] * exposure
+            Lhit = sample_L(face, hp) * exposure
             val = Lhit / (Lhit + Lmax)
             val = np.power(np.clip(val, 0.0, 1.0), 1.0 / 2.2)
             val = np.clip(val * brightness, 0.0, 1.0)

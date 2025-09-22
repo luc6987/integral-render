@@ -21,8 +21,12 @@ materials = Materials(
     Le_light=10.0,
 )
 
+# ---- Basis function type ----
+# Options: "P0" (constant per patch) or "P1" (Q1 bilinear per element)
+basis_type = "P1"  # Change to "P1" for Q1 bilinear basis
+
 # ---- Subdivisions ----
-rhodiv = 10  # density factor for patches
+rhodiv = 4  # density factor for patches
 subdivisions = Subdivisions(
     floor=(rhodiv * int(W), rhodiv * int(D)),
     ceiling=(int(W), int(D)),
@@ -39,7 +43,7 @@ light_size = (1.0, 1.0)
 # ---- Composition-aware extra prisms (same subdivision as cube) ----
 prisms = [
     # P0: foreground slender (near camera, left), tall for depth
-    RectPrism(x0=0.5, x1=1.0, y0=0.6, y1=1.1, z0=1e-3, z1=1.4),
+    RectPrism(x0=1.5, x1=2.0, y0=0.6, y1=1.1, z0=1e-3, z1=1.5),
     # P1: mid-right broad low block (secondary mass)
     RectPrism(x0=3.4, x1=4.2, y0=1.8, y1=2.5, z0=1e-3, z1=0.6),
     # P2: back-right slim tall (counterweight, far depth cue)
@@ -60,6 +64,7 @@ scene_config = SceneConfig(
     extra_prisms=prisms,
     cube=cube,
     subdivisions=subdivisions,
+    basis_type=basis_type,
 )
 
 # ---- Light scenarios ----
@@ -70,18 +75,18 @@ scenarios = [
         "size": light_size,
         "Le": materials.Le_light,
     },
-    {
-        "name": "center",
-        "positions": [(W / 2.0, D / 2.0)],
-        "size": light_size,
-        "Le": materials.Le_light,
-    },
-    {
-        "name": "two_lights",
-        "positions": [(0.8, 0.8), (W - 0.8, D - 0.8)],
-        "size": (0.8, 0.8),
-        "Le": materials.Le_light,
-    },
+    # {
+    #     "name": "center",
+    #     "positions": [(W / 2.0, D / 2.0)],
+    #     "size": light_size,
+    #     "Le": materials.Le_light,
+    # },
+    # {
+    #     "name": "two_lights",
+    #     "positions": [(0.8, 0.8), (W - 0.8, D - 0.8)],
+    #     "size": (0.8, 0.8),
+    #     "Le": materials.Le_light,
+    # },
 ]
 
 # ---- Camera and render settings ----
@@ -91,7 +96,7 @@ cam_up = np.array([0.0, 0.0, 1.0])
 
 width = 960
 height = 720
-fov_y_deg = 55.0
-exposure = 10.0
-brightness = 2.2
+fov_y_deg = 70.0
+exposure = 100.0
+brightness = 5.2
 

@@ -50,6 +50,8 @@ class SceneConfig:
     )
     # Extra rectangular prisms (axis-aligned), optional
     extra_prisms: Optional[List["RectPrism"]] = None
+    # Basis function type: "P0" (constant per patch) or "P1" (Q1 bilinear per element)
+    basis_type: str = "P0"
 
 
 class Patch:
@@ -82,6 +84,59 @@ class Patch:
         self.ij = ij
 
 
+class P1Node:
+    """P1 node for Q1 bilinear basis functions."""
+    __slots__ = (
+        "position",
+        "normal",
+        "rho",
+        "is_light",
+        "face",
+        "ij",
+        "global_id",
+    )
+
+    def __init__(
+        self,
+        position: np.ndarray,
+        normal: np.ndarray,
+        rho: float,
+        is_light: bool,
+        face: str,
+        ij: Tuple[int, int],
+        global_id: int,
+    ) -> None:
+        self.position = position
+        self.normal = normal
+        self.rho = rho
+        self.is_light = is_light
+        self.face = face
+        self.ij = ij
+        self.global_id = global_id
+
+
+class P1Element:
+    """P1 element (quadrilateral) with 4 nodes for Q1 bilinear basis."""
+    __slots__ = (
+        "nodes",
+        "face",
+        "area",
+        "element_id",
+    )
+
+    def __init__(
+        self,
+        nodes: List[P1Node],
+        face: str,
+        area: float,
+        element_id: int,
+    ) -> None:
+        self.nodes = nodes  # List of 4 P1Node objects
+        self.face = face
+        self.area = area
+        self.element_id = element_id
+
+
 def _make_grid_on_plane(
     origin: np.ndarray,
     ux: np.ndarray,
@@ -106,6 +161,67 @@ def _make_grid_on_plane(
                 Patch(c, n, cell_area, rho, is_light, face, (i, j))
             )
     return patches
+
+
+def _make_p1_grid_on_plane(
+    origin: np.ndarray,
+    ux: np.ndarray,
+    uy: np.ndarray,
+    nx: int,
+    ny: int,
+    rho: float,
+    normal: np.ndarray,
+    face: str,
+    light_mask: Optional[Callable[[int, int], bool]] = None,
+) -> Tuple[List[P1Node], List[P1Element]]:
+    """Create P1 nodes and elements on a plane with Q1 bilinear basis functions."""
+    nodes: List[P1Node] = []
+    elements: List[P1Element] = []
+    
+    dx = 1.0 / nx
+    dy = 1.0 / ny
+    element_area = float(np.linalg.norm(np.cross(ux * dx, uy * dy)))
+    n = normal / (np.linalg.norm(normal) + EPS)
+    
+    # Create nodes
+    node_id = 0
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            pos = origin + ux * (i * dx) + uy * (j * dy)
+            is_light = light_mask(i, j) if light_mask is not None else False
+            node = P1Node(
+                position=pos,
+                normal=n,
+                rho=rho,
+                is_light=is_light,
+                face=face,
+                ij=(i, j),
+                global_id=node_id,
+            )
+            nodes.append(node)
+            node_id += 1
+    
+    # Create elements
+    element_id = 0
+    for i in range(nx):
+        for j in range(ny):
+            # Get the 4 nodes for this element (counter-clockwise)
+            n0_idx = i * (ny + 1) + j
+            n1_idx = (i + 1) * (ny + 1) + j
+            n2_idx = (i + 1) * (ny + 1) + (j + 1)
+            n3_idx = i * (ny + 1) + (j + 1)
+            
+            element_nodes = [nodes[n0_idx], nodes[n1_idx], nodes[n2_idx], nodes[n3_idx]]
+            element = P1Element(
+                nodes=element_nodes,
+                face=face,
+                area=element_area,
+                element_id=element_id,
+            )
+            elements.append(element)
+            element_id += 1
+    
+    return nodes, elements
 
 
 def _mk_multi_ceiling_light_mask(
@@ -149,6 +265,10 @@ class BuiltScene:
     # Additional prisms and a face->bounds map for rendering
     prisms: List["PrismBounds"]
     prism_bounds_map: Dict[str, "PrismBounds"]
+    # P1 specific data (only populated when basis_type="P1")
+    nodes: Optional[List[P1Node]] = None
+    elements: Optional[List[P1Element]] = None
+    basis_type: str = "P0"
 
 
 @dataclass
@@ -172,9 +292,307 @@ class PrismBounds:
     z1: float
 
 
-def build_scene(config: SceneConfig) -> BuiltScene:
+def build_scene_p1(config: SceneConfig) -> BuiltScene:
+    """Build scene with P1 (Q1 bilinear) basis functions."""
     W, D, H = config.box.W, config.box.D, config.box.H
-    print(f"[Scene] Building scene: W={W}, D={D}, H={H}")
+    print(f"[Scene] Building P1 scene: W={W}, D={D}, H={H}")
+    rho_floor = config.materials.rho_floor
+    rho_ceiling = config.materials.rho_ceiling
+    rho_walls = config.materials.rho_walls
+    rho_cube = config.materials.rho_cube
+
+    # Use subdivisions from config
+    s = config.subdivisions
+    sub_floor = s.floor
+    sub_ceiling = s.ceiling
+    sub_wall_x0 = s.wall_x0
+    sub_wall_x1 = s.wall_x1
+    sub_wall_y0 = s.wall_y0
+    sub_wall_y1 = s.wall_y1
+    sub_cube = s.cube
+
+    cube_size = config.cube.size
+    cube_z0 = config.cube.z0
+    cube_center = np.array(
+        [W / 2.0, D / 2.0, cube_z0 + cube_size / 2.0]
+    )
+    cube_x0 = float(cube_center[0] - cube_size / 2.0)
+    cube_x1 = float(cube_center[0] + cube_size / 2.0)
+    cube_y0 = float(cube_center[1] - cube_size / 2.0)
+    cube_y1 = float(cube_center[1] + cube_size / 2.0)
+    cube_z1 = float(cube_z0 + cube_size)
+
+    all_nodes: List[P1Node] = []
+    all_elements: List[P1Element] = []
+    global_node_id = 0
+    global_element_id = 0
+
+    # Floor
+    origin_floor = np.array([0.0, 0.0, 0.0])
+    ux_floor = np.array([W, 0.0, 0.0])
+    uy_floor = np.array([0.0, D, 0.0])
+    nodes, elements = _make_p1_grid_on_plane(
+        origin_floor,
+        ux_floor,
+        uy_floor,
+        sub_floor[0],
+        sub_floor[1],
+        rho_floor,
+        np.array([0, 0, 1]),
+        "floor",
+    )
+    # Update global IDs
+    for node in nodes:
+        node.global_id = global_node_id
+        global_node_id += 1
+    for element in elements:
+        element.element_id = global_element_id
+        global_element_id += 1
+    all_nodes.extend(nodes)
+    all_elements.extend(elements)
+
+    # Ceiling
+    origin_ceil = np.array([0.0, 0.0, H])
+    ux_ceil = np.array([W, 0.0, 0.0])
+    uy_ceil = np.array([0.0, D, 0.0])
+    light_mask = None
+    if config.light_positions and len(config.light_positions) > 0:
+        light_mask = _mk_multi_ceiling_light_mask(
+            sub_ceiling, W, D, config.light_size, config.light_positions
+        )
+    nodes, elements = _make_p1_grid_on_plane(
+        origin_ceil,
+        ux_ceil,
+        uy_ceil,
+        sub_ceiling[0],
+        sub_ceiling[1],
+        rho_ceiling,
+        np.array([0, 0, -1]),
+        "ceiling",
+        light_mask,
+    )
+    # Update global IDs
+    for node in nodes:
+        node.global_id = global_node_id
+        global_node_id += 1
+    for element in elements:
+        element.element_id = global_element_id
+        global_element_id += 1
+    all_nodes.extend(nodes)
+    all_elements.extend(elements)
+
+    # Walls
+    origin_y0 = np.array([0.0, 0.0, 0.0])
+    ux_y0 = np.array([W, 0.0, 0.0])
+    uy_y0 = np.array([0.0, 0.0, H])
+    nodes, elements = _make_p1_grid_on_plane(
+        origin_y0,
+        ux_y0,
+        uy_y0,
+        sub_wall_y0[0],
+        sub_wall_y0[1],
+        rho_walls,
+        np.array([0, 1, 0]),
+        "wall_y0",
+    )
+    for node in nodes:
+        node.global_id = global_node_id
+        global_node_id += 1
+    for element in elements:
+        element.element_id = global_element_id
+        global_element_id += 1
+    all_nodes.extend(nodes)
+    all_elements.extend(elements)
+
+    origin_y1 = np.array([0.0, D, 0.0])
+    ux_y1 = np.array([W, 0.0, 0.0])
+    uy_y1 = np.array([0.0, 0.0, H])
+    nodes, elements = _make_p1_grid_on_plane(
+        origin_y1,
+        ux_y1,
+        uy_y1,
+        sub_wall_y1[0],
+        sub_wall_y1[1],
+        rho_walls,
+        np.array([0, -1, 0]),
+        "wall_y1",
+    )
+    for node in nodes:
+        node.global_id = global_node_id
+        global_node_id += 1
+    for element in elements:
+        element.element_id = global_element_id
+        global_element_id += 1
+    all_nodes.extend(nodes)
+    all_elements.extend(elements)
+
+    origin_x0 = np.array([0.0, 0.0, 0.0])
+    ux_x0 = np.array([0.0, D, 0.0])
+    uy_x0 = np.array([0.0, 0.0, H])
+    nodes, elements = _make_p1_grid_on_plane(
+        origin_x0,
+        ux_x0,
+        uy_x0,
+        sub_wall_x0[0],
+        sub_wall_x0[1],
+        rho_walls,
+        np.array([1, 0, 0]),
+        "wall_x0",
+    )
+    for node in nodes:
+        node.global_id = global_node_id
+        global_node_id += 1
+    for element in elements:
+        element.element_id = global_element_id
+        global_element_id += 1
+    all_nodes.extend(nodes)
+    all_elements.extend(elements)
+
+    origin_x1 = np.array([W, 0.0, 0.0])
+    ux_x1 = np.array([0.0, D, 0.0])
+    uy_x1 = np.array([0.0, 0.0, H])
+    nodes, elements = _make_p1_grid_on_plane(
+        origin_x1,
+        ux_x1,
+        uy_x1,
+        sub_wall_x1[0],
+        sub_wall_x1[1],
+        rho_walls,
+        np.array([-1, 0, 0]),
+        "wall_x1",
+    )
+    for node in nodes:
+        node.global_id = global_node_id
+        global_node_id += 1
+    for element in elements:
+        element.element_id = global_element_id
+        global_element_id += 1
+    all_nodes.extend(nodes)
+    all_elements.extend(elements)
+
+    # Cube faces
+    cube_faces = [
+        ("cube_top", np.array([cube_x0, cube_y0, cube_z1]), np.array([cube_x1 - cube_x0, 0.0, 0.0]), np.array([0.0, cube_y1 - cube_y0, 0.0]), np.array([0, 0, 1])),
+        ("cube_bottom", np.array([cube_x0, cube_y0, cube_z0]), np.array([cube_x1 - cube_x0, 0.0, 0.0]), np.array([0.0, cube_y1 - cube_y0, 0.0]), np.array([0, 0, -1])),
+        ("cube_x0", np.array([cube_x0, cube_y0, cube_z0]), np.array([0.0, cube_y1 - cube_y0, 0.0]), np.array([0.0, 0.0, cube_z1 - cube_z0]), np.array([-1, 0, 0])),
+        ("cube_x1", np.array([cube_x1, cube_y0, cube_z0]), np.array([0.0, cube_y1 - cube_y0, 0.0]), np.array([0.0, 0.0, cube_z1 - cube_z0]), np.array([1, 0, 0])),
+        ("cube_y0", np.array([cube_x0, cube_y0, cube_z0]), np.array([cube_x1 - cube_x0, 0.0, 0.0]), np.array([0.0, 0.0, cube_z1 - cube_z0]), np.array([0, -1, 0])),
+        ("cube_y1", np.array([cube_x0, cube_y1, cube_z0]), np.array([cube_x1 - cube_x0, 0.0, 0.0]), np.array([0.0, 0.0, cube_z1 - cube_z0]), np.array([0, 1, 0])),
+    ]
+    
+    for face_name, origin, ux, uy, normal in cube_faces:
+        nodes, elements = _make_p1_grid_on_plane(
+            origin, ux, uy, sub_cube[0], sub_cube[1], rho_cube, normal, face_name
+        )
+        for node in nodes:
+            node.global_id = global_node_id
+            global_node_id += 1
+        for element in elements:
+            element.element_id = global_element_id
+            global_element_id += 1
+        all_nodes.extend(nodes)
+        all_elements.extend(elements)
+
+    # Extra prisms
+    prisms: List[PrismBounds] = []
+    prism_bounds_map: Dict[str, PrismBounds] = {}
+    if config.extra_prisms:
+        print(f"[Scene] Adding {len(config.extra_prisms)} extra prisms...")
+        for k, rp in enumerate(config.extra_prisms):
+            name = f"prism{k}"
+            pb = PrismBounds(name=name, x0=rp.x0, x1=rp.x1, y0=rp.y0, y1=rp.y1, z0=rp.z0, z1=rp.z1)
+            prisms.append(pb)
+            
+            prism_faces = [
+                (f"{name}_top", np.array([rp.x0, rp.y0, rp.z1]), np.array([rp.x1 - rp.x0, 0.0, 0.0]), np.array([0.0, rp.y1 - rp.y0, 0.0]), np.array([0, 0, 1])),
+                (f"{name}_bottom", np.array([rp.x0, rp.y0, rp.z0]), np.array([rp.x1 - rp.x0, 0.0, 0.0]), np.array([0.0, rp.y1 - rp.y0, 0.0]), np.array([0, 0, -1])),
+                (f"{name}_x0", np.array([rp.x0, rp.y0, rp.z0]), np.array([0.0, rp.y1 - rp.y0, 0.0]), np.array([0.0, 0.0, rp.z1 - rp.z0]), np.array([-1, 0, 0])),
+                (f"{name}_x1", np.array([rp.x1, rp.y0, rp.z0]), np.array([0.0, rp.y1 - rp.y0, 0.0]), np.array([0.0, 0.0, rp.z1 - rp.z0]), np.array([1, 0, 0])),
+                (f"{name}_y0", np.array([rp.x0, rp.y0, rp.z0]), np.array([rp.x1 - rp.x0, 0.0, 0.0]), np.array([0.0, 0.0, rp.z1 - rp.z0]), np.array([0, -1, 0])),
+                (f"{name}_y1", np.array([rp.x0, rp.y1, rp.z0]), np.array([rp.x1 - rp.x0, 0.0, 0.0]), np.array([0.0, 0.0, rp.z1 - rp.z0]), np.array([0, 1, 0])),
+            ]
+            
+            for face_name, origin, ux, uy, normal in prism_faces:
+                nodes, elements = _make_p1_grid_on_plane(
+                    origin, ux, uy, sub_cube[0], sub_cube[1], rho_cube, normal, face_name
+                )
+                for node in nodes:
+                    node.global_id = global_node_id
+                    global_node_id += 1
+                for element in elements:
+                    element.element_id = global_element_id
+                    global_element_id += 1
+                all_nodes.extend(nodes)
+                all_elements.extend(elements)
+                prism_bounds_map[face_name] = pb
+
+    # Create arrays for compatibility with existing code
+    positions = np.array([node.position for node in all_nodes])
+    normals = np.array([node.normal for node in all_nodes])
+    rho_arr = np.array([node.rho for node in all_nodes])
+    is_light_arr = np.array([node.is_light for node in all_nodes])
+    
+    # For P1, we don't have traditional "areas" per node, so we'll use element areas
+    # This is a simplification - in practice, you'd need proper mass lumping
+    areas = np.ones(len(all_nodes))  # Placeholder
+    
+    print(f"[Scene] Total P1 nodes: {len(all_nodes)}")
+    print(f"[Scene] Total P1 elements: {len(all_elements)}")
+
+    sub_by_face = {
+        "floor": sub_floor,
+        "ceiling": sub_ceiling,
+        "wall_x0": sub_wall_x0,
+        "wall_x1": sub_wall_x1,
+        "wall_y0": sub_wall_y0,
+        "wall_y1": sub_wall_y1,
+        "cube_top": sub_cube,
+        "cube_bottom": sub_cube,
+        "cube_x0": sub_cube,
+        "cube_x1": sub_cube,
+        "cube_y0": sub_cube,
+        "cube_y1": sub_cube,
+    }
+
+    # Register prism faces
+    for pb in prisms:
+        for suffix in ("top", "bottom", "x0", "x1", "y0", "y1"):
+            sub_by_face[f"{pb.name}_{suffix}"] = sub_cube
+
+    cube_bounds = {
+        "cube_x0": cube_x0,
+        "cube_x1": cube_x1,
+        "cube_y0": cube_y0,
+        "cube_y1": cube_y1,
+        "cube_z0": cube_z0,
+        "cube_z1": cube_z1,
+    }
+
+    return BuiltScene(
+        patches=[],  # Empty for P1
+        centers=positions,
+        normals=normals,
+        areas=areas,
+        rho=rho_arr,
+        is_light=is_light_arr,
+        sub_by_face=sub_by_face,
+        cube_bounds=cube_bounds,
+        prisms=prisms,
+        prism_bounds_map=prism_bounds_map,
+        nodes=all_nodes,
+        elements=all_elements,
+        basis_type="P1",
+    )
+
+
+def build_scene(config: SceneConfig) -> BuiltScene:
+    """Build scene with either P0 or P1 basis functions based on config.basis_type."""
+    if config.basis_type == "P1":
+        return build_scene_p1(config)
+    
+    # P0 implementation (original)
+    W, D, H = config.box.W, config.box.D, config.box.H
+    print(f"[Scene] Building P0 scene: W={W}, D={D}, H={H}")
     rho_floor = config.materials.rho_floor
     rho_ceiling = config.materials.rho_ceiling
     rho_walls = config.materials.rho_walls
@@ -211,10 +629,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_floor,
         ux_floor,
         uy_floor,
-        *sub_floor,
+        sub_floor[0],
+        sub_floor[1],
         rho_floor,
         np.array([0, 0, 1]),
-        face="floor",
+        "floor",
     )
 
     # Ceiling
@@ -230,11 +649,12 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_ceil,
         ux_ceil,
         uy_ceil,
-        *sub_ceiling,
+        sub_ceiling[0],
+        sub_ceiling[1],
         rho_ceiling,
         np.array([0, 0, -1]),
-        face="ceiling",
-        light_mask=light_mask,
+        "ceiling",
+        light_mask,
     )
 
     # Walls
@@ -245,10 +665,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_y0,
         ux_y0,
         uy_y0,
-        *sub_wall_y0,
+        sub_wall_y0[0],
+        sub_wall_y0[1],
         rho_walls,
         np.array([0, 1, 0]),
-        face="wall_y0",
+        "wall_y0",
     )
 
     origin_y1 = np.array([0.0, D, 0.0])
@@ -258,10 +679,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_y1,
         ux_y1,
         uy_y1,
-        *sub_wall_y1,
+        sub_wall_y1[0],
+        sub_wall_y1[1],
         rho_walls,
         np.array([0, -1, 0]),
-        face="wall_y1",
+        "wall_y1",
     )
 
     origin_x0 = np.array([0.0, 0.0, 0.0])
@@ -271,10 +693,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_x0,
         ux_x0,
         uy_x0,
-        *sub_wall_x0,
+        sub_wall_x0[0],
+        sub_wall_x0[1],
         rho_walls,
         np.array([1, 0, 0]),
-        face="wall_x0",
+        "wall_x0",
     )
 
     origin_x1 = np.array([W, 0.0, 0.0])
@@ -284,10 +707,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_x1,
         ux_x1,
         uy_x1,
-        *sub_wall_x1,
+        sub_wall_x1[0],
+        sub_wall_x1[1],
         rho_walls,
         np.array([-1, 0, 0]),
-        face="wall_x1",
+        "wall_x1",
     )
 
     # Cube
@@ -298,10 +722,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_ctop,
         ux_ctop,
         uy_ctop,
-        *sub_cube,
+        sub_cube[0],
+        sub_cube[1],
         rho_cube,
         np.array([0, 0, 1]),
-        face="cube_top",
+        "cube_top",
     )
 
     origin_cbot = np.array([cube_x0, cube_y0, cube_z0])
@@ -311,10 +736,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_cbot,
         ux_cbot,
         uy_cbot,
-        *sub_cube,
+        sub_cube[0],
+        sub_cube[1],
         rho_cube,
         np.array([0, 0, -1]),
-        face="cube_bottom",
+        "cube_bottom",
     )
 
     origin_cx0 = np.array([cube_x0, cube_y0, cube_z0])
@@ -324,10 +750,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_cx0,
         ux_cx0,
         uy_cx0,
-        *sub_cube,
+        sub_cube[0],
+        sub_cube[1],
         rho_cube,
         np.array([-1, 0, 0]),
-        face="cube_x0",
+        "cube_x0",
     )
 
     origin_cx1 = np.array([cube_x1, cube_y0, cube_z0])
@@ -337,10 +764,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_cx1,
         ux_cx1,
         uy_cx1,
-        *sub_cube,
+        sub_cube[0],
+        sub_cube[1],
         rho_cube,
         np.array([1, 0, 0]),
-        face="cube_x1",
+        "cube_x1",
     )
 
     origin_cy0 = np.array([cube_x0, cube_y0, cube_z0])
@@ -350,10 +778,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_cy0,
         ux_cy0,
         uy_cy0,
-        *sub_cube,
+        sub_cube[0],
+        sub_cube[1],
         rho_cube,
         np.array([0, -1, 0]),
-        face="cube_y0",
+        "cube_y0",
     )
 
     origin_cy1 = np.array([cube_x0, cube_y1, cube_z0])
@@ -363,10 +792,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         origin_cy1,
         ux_cy1,
         uy_cy1,
-        *sub_cube,
+        sub_cube[0],
+        sub_cube[1],
         rho_cube,
         np.array([0, 1, 0]),
-        face="cube_y1",
+        "cube_y1",
     )
 
     # Extra prisms (axis-aligned boxes) with same subdivision as cube
@@ -387,10 +817,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
                 origin_ptop,
                 ux_ptop,
                 uy_ptop,
-                *sub_cube,
+                sub_cube[0],
+                sub_cube[1],
                 rho_cube,
                 np.array([0, 0, 1]),
-                face=face_top,
+                face_top,
             )
             prism_bounds_map[face_top] = pb
             # Bottom
@@ -402,10 +833,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
                 origin_pbot,
                 ux_pbot,
                 uy_pbot,
-                *sub_cube,
+                sub_cube[0],
+                sub_cube[1],
                 rho_cube,
                 np.array([0, 0, -1]),
-                face=face_bot,
+                face_bot,
             )
             prism_bounds_map[face_bot] = pb
             # x0
@@ -417,10 +849,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
                 origin_px0,
                 ux_px0,
                 uy_px0,
-                *sub_cube,
+                sub_cube[0],
+                sub_cube[1],
                 rho_cube,
                 np.array([-1, 0, 0]),
-                face=face_x0,
+                face_x0,
             )
             prism_bounds_map[face_x0] = pb
             # x1
@@ -432,10 +865,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
                 origin_px1,
                 ux_px1,
                 uy_px1,
-                *sub_cube,
+                sub_cube[0],
+                sub_cube[1],
                 rho_cube,
                 np.array([1, 0, 0]),
-                face=face_x1,
+                face_x1,
             )
             prism_bounds_map[face_x1] = pb
             # y0
@@ -447,10 +881,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
                 origin_py0,
                 ux_py0,
                 uy_py0,
-                *sub_cube,
+                sub_cube[0],
+                sub_cube[1],
                 rho_cube,
                 np.array([0, -1, 0]),
-                face=face_y0,
+                face_y0,
             )
             prism_bounds_map[face_y0] = pb
             # y1
@@ -462,10 +897,11 @@ def build_scene(config: SceneConfig) -> BuiltScene:
                 origin_py1,
                 ux_py1,
                 uy_py1,
-                *sub_cube,
+                sub_cube[0],
+                sub_cube[1],
                 rho_cube,
                 np.array([0, 1, 0]),
-                face=face_y1,
+                face_y1,
             )
             prism_bounds_map[face_y1] = pb
 
@@ -516,6 +952,7 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         cube_bounds=cube_bounds,
         prisms=prisms,
         prism_bounds_map=prism_bounds_map,
+        basis_type="P0",
     )
 
 
