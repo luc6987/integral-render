@@ -75,18 +75,6 @@ scenarios = [
         "size": light_size,
         "Le": materials.Le_light,
     },
-    # {
-    #     "name": "center",
-    #     "positions": [(W / 2.0, D / 2.0)],
-    #     "size": light_size,
-    #     "Le": materials.Le_light,
-    # },
-    # {
-    #     "name": "two_lights",
-    #     "positions": [(0.8, 0.8), (W - 0.8, D - 0.8)],
-    #     "size": (0.8, 0.8),
-    #     "Le": materials.Le_light,
-    # },
 ]
 
 # ---- Camera and render settings ----
@@ -96,7 +84,9 @@ cam_up = np.array([0.0, 0.0, 1.0])
 
 width = 960
 height = 720
-fov_y_deg = 70.0
-exposure = 100.0
-brightness = 5.2
+fov_y_deg = 55.0
+exposure = 10.0
+brightness = 2.2
+# Percentile for tone mapping white point (e.g., 99.0 means 99th percentile)
+tone_white_percentile = 99.5
 

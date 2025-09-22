@@ -19,13 +19,13 @@ def solve_from_csv(csv_dir: Path) -> dict:
     - Saves `x.csv` (radiosity) and `L.csv` (radiance = x/pi).
     """
     A_path = csv_dir / "A.csv"
-    b_path = csv_dir / "b.csv"
-    if not A_path.exists() or not b_path.exists():
+    B_path = csv_dir / "b.csv"
+    if not A_path.exists() or not B_path.exists():
         raise FileNotFoundError("A.csv or b.csv not found in " + str(csv_dir))
     print(f"[Solve] Loading A from {A_path}")
-    print(f"[Solve] Loading b from {b_path}")
+    print(f"[Solve] Loading b from {B_path}")
     A = _load_csv_matrix(A_path)
-    b = _load_csv_matrix(b_path)
+    b = _load_csv_matrix(B_path)
 
     # Ensure b is 2D: (N,) -> (N,1)
     if b.ndim == 1:
@@ -52,7 +52,9 @@ def solve_from_csv(csv_dir: Path) -> dict:
 
 
 def main():
-    csv_dir = Path(__file__).parent / "linear_system_csv"
+    # Use project root's linear_system_csv by default
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    csv_dir = PROJECT_ROOT / "linear_system_csv"
     solve_from_csv(csv_dir)
 
 

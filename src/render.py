@@ -1,8 +1,19 @@
 import numpy as np  # type: ignore
 from pathlib import Path
 from typing import Dict, Tuple, Optional
+import sys
 
-from .scene import BuiltScene, BoxDimensions, build_scene
+# Ensure project root is on sys.path so `import setup` works when running this file directly
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Support running as a module (relative import) and as a script (absolute import)
+try:
+    from .scene import BuiltScene, BoxDimensions, build_scene
+except Exception:
+    from src.scene import BuiltScene, BoxDimensions, build_scene
+
 from setup import (
     scene_config,
     cam_pos,
@@ -13,6 +24,7 @@ from setup import (
     fov_y_deg,
     exposure,
     brightness,
+    tone_white_percentile,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -371,11 +383,29 @@ def render_photo(
             j = min(ny - 1, max(0, int(v * ny)))
             return float(L_face[face][j, i])
 
-    # Tone mapping reference
-    Lmax = 0.0
-    for k, arr in L_face.items():
-        Lmax = max(Lmax, float(np.max(arr)))
-    Lmax = (Lmax + 1e-8) * exposure
+    # Tone mapping reference: use percentile white point, not absolute max
+    if scene.basis_type == "P1":
+        # Gather all node values
+        all_vals = []
+        for arr in L_face.values():
+            all_vals.append(arr.reshape(-1))
+        if len(all_vals) > 0:
+            import numpy as _np
+            vals = _np.concatenate(all_vals)
+            Lwhite = float(_np.percentile(vals, tone_white_percentile)) + 1e-8
+        else:
+            Lwhite = 1e-3
+    else:
+        # P0: gather patch-center values
+        all_vals = []
+        for arr in L_face.values():
+            all_vals.append(arr.reshape(-1))
+        if len(all_vals) > 0:
+            import numpy as _np
+            vals = _np.concatenate(all_vals)
+            Lwhite = float(_np.percentile(vals, tone_white_percentile)) + 1e-8
+        else:
+            Lwhite = 1e-3
 
     try:
         from tqdm import tqdm  # type: ignore
@@ -395,8 +425,10 @@ def render_photo(
             t, face, hp = intersect_scene(cam_pos, dir_cam)
             if face is None or not np.isfinite(t):
                 continue
-            Lhit = sample_L(face, hp) * exposure
-            val = Lhit / (Lhit + Lmax)
+            # Apply exposure to sample only; Lwhite is percentile-based scene reference
+            Lhit = sample_L(face, hp)
+            Lexp = Lhit * exposure
+            val = Lexp / (Lexp + Lwhite)
             val = np.power(np.clip(val, 0.0, 1.0), 1.0 / 2.2)
             val = np.clip(val * brightness, 0.0, 1.0)
             img[ypix, xpix, :] = val

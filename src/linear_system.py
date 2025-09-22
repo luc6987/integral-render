@@ -461,16 +461,59 @@ def _compute_p1_light_mask(scene: BuiltScene, light_positions, light_size):
     return is_light
 
 
+def _integrate_p1_rhs_for_lights(scene: BuiltScene, light_positions, light_size, Le: float) -> np.ndarray:
+    """Assemble P1 RHS f_i = ∫ phi_i(x) E(x) dA, where E=pi*Le on ceiling light rectangles.
+
+    We integrate over P1 elements on the ceiling using tensor-product Gauss quadrature.
+    """
+    n_nodes = len(scene.nodes)
+    f = np.zeros(n_nodes, dtype=np.float64)
+    if not light_positions or Le <= 0.0:
+        return f
+    lx, ly = light_size
+    rects = [(cx - lx / 2.0, cx + lx / 2.0, cy - ly / 2.0, cy + ly / 2.0) for (cx, cy) in light_positions]
+
+    # Use modest quadrature (2x2) which matches element mass matrix degree here
+    quad_points, quad_weights = gauss_quadrature_2d(2)
+
+    for elem in scene.elements or []:
+        if elem.face != "ceiling":
+            continue
+        nodes = elem.nodes
+        h = np.sqrt(elem.area)
+        J = h * h  # uniform square assumption consistent with assembly
+
+        # Map reference to world position
+        def map_pos(xi, eta):
+            pos = np.zeros(3)
+            Ni = q1_basis_functions(xi, eta)
+            for k in range(4):
+                pos += Ni[k] * nodes[k].position
+            return pos
+
+        for q, (xi_q, eta_q) in enumerate(quad_points):
+            wq = quad_weights[q]
+            pos = map_pos(xi_q, eta_q)
+            xw, yw = float(pos[0]), float(pos[1])
+            inside = False
+            for x0, x1, y0, y1 in rects:
+                if x0 <= xw <= x1 and y0 <= yw <= y1:
+                    inside = True
+                    break
+            if not inside:
+                continue
+            Ni = q1_basis_functions(xi_q, eta_q)
+            for a in range(4):
+                f[nodes[a].global_id] += (np.pi * Le) * Ni[a] * wq * J
+    return f
+
+
 def _build_M_E_for_scenario(scene: BuiltScene, F: np.ndarray, *, positions, size, Le) -> Tuple[np.ndarray, np.ndarray]:
     if scene.basis_type == "P1":
-        # For P1, F here is actually the system matrix A = M - R Fgeo (from build_linear_system_p1)
+        # System matrix already assembled in F (actually A)
         A = F
-        # Assemble mass matrix once (cheap) to build RHS f = M @ E for this scenario
-        M_mass = assemble_p1_mass_matrix(scene)
-        is_light_mask = _compute_p1_light_mask(scene, positions, size)
-        E = np.zeros(scene.centers.shape[0])
-        E[is_light_mask] = np.pi * Le
-        f = M_mass @ E
+        # Proper RHS by integrating basis over light area
+        f = _integrate_p1_rhs_for_lights(scene, positions, size, Le)
         return A, f
     
     # P0 implementation (original)
