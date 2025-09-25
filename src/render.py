@@ -436,10 +436,21 @@ def render_photo(
 
 
 def save_image(img: np.ndarray, out_path: Path) -> None:
-    import matplotlib.pyplot as plt  # type: ignore
+    from PIL import Image
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.imsave(str(out_path), np.clip(img, 0, 1))
+    data = np.clip(img, 0.0, 1.0)
+
+    if data.ndim == 2:
+        mode = "L"
+        pixels = (data * 255).astype(np.uint8)
+    elif data.ndim == 3 and data.shape[2] in (3, 4):
+        mode = "RGB" if data.shape[2] == 3 else "RGBA"
+        pixels = (data * 255).astype(np.uint8)
+    else:
+        raise ValueError(f"Unsupported image shape {data.shape}")
+
+    Image.fromarray(pixels, mode=mode).save(out_path)
     print(f"[Render] Saved image to {out_path}")
 
 

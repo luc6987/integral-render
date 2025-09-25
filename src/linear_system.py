@@ -97,13 +97,13 @@ def q1_basis_functions(xi: float, eta: float) -> np.ndarray:
     ])
 
 
-def q1_basis_gradients() -> np.ndarray:
-    """Gradients of Q1 basis functions (constant for bilinear)."""
+def q1_basis_gradients(xi: float, eta: float) -> np.ndarray:
+    """Gradients of Q1 basis functions on [0,1]^2 for a given (xi, eta)."""
     return np.array([
-        [-1, -1],  # grad N1
-        [1, -1],   # grad N2
-        [1, 1],    # grad N3
-        [-1, 1],   # grad N4
+        [-(1.0 - eta), -(1.0 - xi)],  # grad N1
+        [1.0 - eta, -xi],             # grad N2
+        [eta, xi],                    # grad N3
+        [-eta, 1.0 - xi],             # grad N4
     ])
 
 
@@ -157,12 +157,10 @@ def gauss_quadrature_2d(n_points: int = 2) -> Tuple[np.ndarray, np.ndarray]:
     
     return points, weights
 
-
 def _compute_single_element_pair_kernel(args):
     """Helper function for parallel computation of element pair kernels."""
     element_i, element_j, n_quad = args
     return compute_geometric_kernel_element_pair(element_i, element_j, n_quad)
-
 
 def compute_geometric_kernel_element_pair(
     element_i: P1Element, 
@@ -172,75 +170,74 @@ def compute_geometric_kernel_element_pair(
 ) -> np.ndarray:
     """Compute 4x4 geometric kernel matrix between two Q1 elements."""
     K = np.zeros((4, 4))
-    
+    EPS = 1e-12
+
     # Get quadrature points
     quad_points, quad_weights = gauss_quadrature_2d(n_quad)
-    
+
     # Get element geometry
     nodes_i = element_i.nodes
     nodes_j = element_j.nodes
-    
-    # Element i: map from reference to physical coordinates
-    def map_i(xi, eta):
-        pos = np.zeros(3)
-        for k, node in enumerate(nodes_i):
-            N = q1_basis_functions(xi, eta)[k]
-            pos += N * node.position
-        return pos
-    
-    # Element j: map from reference to physical coordinates  
-    def map_j(xi, eta):
-        pos = np.zeros(3)
-        for k, node in enumerate(nodes_j):
-            N = q1_basis_functions(xi, eta)[k]
-            pos += N * node.position
-        return pos
-    
-    # Jacobian for element i (assuming uniform grid)
-    h_i = np.sqrt(element_i.area)
-    J_i = h_i * h_i
-    
-    # Jacobian for element j (assuming uniform grid)
-    h_j = np.sqrt(element_j.area)
-    J_j = h_j * h_j
-    
+    pos_i = np.array([node.position for node in nodes_i])
+    pos_j = np.array([node.position for node in nodes_j])
+    n_i = np.array(nodes_i[0].normal)
+    n_j_const = np.array(nodes_j[0].normal)
+
+    # Precompute mapping info for quadrature points on each element
+    quad_info_i = []
+    for (xi_q, eta_q), w_q in zip(quad_points, quad_weights):
+        N_i = q1_basis_functions(xi_q, eta_q)
+        grad_i = q1_basis_gradients(xi_q, eta_q)
+        x_q = N_i @ pos_i
+        dpos_dxi = grad_i[:, 0] @ pos_i
+        dpos_deta = grad_i[:, 1] @ pos_i
+        J_i = np.linalg.norm(np.cross(dpos_dxi, dpos_deta))
+        quad_info_i.append((x_q, N_i, w_q, J_i))
+
+    quad_info_j = []
+    for (xi_p, eta_p), w_p in zip(quad_points, quad_weights):
+        N_j = q1_basis_functions(xi_p, eta_p)
+        grad_j = q1_basis_gradients(xi_p, eta_p)
+        y_p = N_j @ pos_j
+        dpos_dxi = grad_j[:, 0] @ pos_j
+        dpos_deta = grad_j[:, 1] @ pos_j
+        J_j = np.linalg.norm(np.cross(dpos_dxi, dpos_deta))
+        quad_info_j.append((y_p, N_j, w_p, J_j))
+
     # Double integration over both elements
-    for q, (xi_q, eta_q) in enumerate(quad_points):
-        w_q = quad_weights[q]
-        x_q = map_i(xi_q, eta_q)
-        n_i = nodes_i[0].normal  # Assume constant normal within element
-        
-        for p, (xi_p, eta_p) in enumerate(quad_points):
-            w_p = quad_weights[p]
-            y_p = map_j(xi_p, eta_p)
-            n_j = nodes_j[0].normal  # Assume constant normal within element
-            
+    for x_q, N_i, w_q, J_i in quad_info_i:
+        if J_i <= EPS:
+            continue
+        for y_p, N_j, w_p, J_j in quad_info_j:
+            if J_j <= EPS:
+                continue
+            n_j = n_j_const
+
             # Compute geometric kernel G(x,y)
             r_vec = y_p - x_q
-            r2 = np.dot(r_vec, r_vec) + 1e-12
+            r2 = np.dot(r_vec, r_vec) + EPS
             r = np.sqrt(r2)
-            
-            # Cosine terms
-            cos_i = np.dot(r_vec, n_i) / r
-            cos_j = -np.dot(r_vec, n_j) / r
-            
-            Vflag = 1.0 if (cos_i > 0 and cos_j > 0) else 0.0
-            if Vflag > 0.0 and scene is not None:
-                if is_segment_blocked(scene, x_q, y_p):
-                    Vflag = 0.0
-            
+
+            # Cosine terms (clamped to hemisphere)
+            cos_i = max(0.0, float(np.dot(r_vec, n_i) / r))
+            cos_j = max(0.0, float(-np.dot(r_vec, n_j) / r))
+
+            # Binary visibility via geometry test (independent of cosine)
+            Vflag = 1.0
+            if scene is not None and is_segment_blocked(scene, x_q, y_p):
+                Vflag = 0.0
+
             # Geometric kernel
             G = (cos_i * cos_j) / (np.pi * r2)
-            
-            # Basis function values
-            N_i = q1_basis_functions(xi_q, eta_q)
-            N_j = q1_basis_functions(xi_p, eta_p)
-            
+
             # Accumulate into kernel matrix
+            weight = w_q * w_p * J_i * J_j * Vflag
+            if weight == 0.0:
+                continue
             for a in range(4):
                 for b in range(4):
-                    K[a, b] += N_i[a] * G * Vflag * N_j[b] * w_q * w_p * J_i * J_j
-    
+                    K[a, b] += N_i[a] * G * N_j[b] * weight
+
     return K
 
 
@@ -292,6 +289,17 @@ def assemble_p1_geometric_kernel(scene: BuiltScene, n_workers: int = None) -> np
         scene, cache_dir, skip=skip_visibility, basis_type=scene.basis_type
     )
 
+    # Helper to accumulate a local kernel block into the global matrix with visibility weight
+    def accumulate(elem_i: P1Element, elem_j: P1Element, K_elem: np.ndarray) -> None:
+        for a, node_a in enumerate(elem_i.nodes):
+            idx_a = node_a.global_id
+            for b, node_b in enumerate(elem_j.nodes):
+                idx_b = node_b.global_id
+                vis = Vmat[idx_a, idx_b]
+                if vis == 0.0:
+                    continue
+                F[idx_a, idx_b] += K_elem[a, b] * vis
+
     # Prepare element pairs for parallel computation
     element_pairs = []
     for i, elem_i in enumerate(scene.elements):
@@ -312,13 +320,7 @@ def assemble_p1_geometric_kernel(scene: BuiltScene, n_workers: int = None) -> np
             if tqdm is not None and i % 100 == 0:
                 tqdm.write(f"Processing element pair {i}/{total_pairs}")
             K_elem = compute_geometric_kernel_element_pair(elem_i, elem_j, n_quad, scene=scene)
-            
-            # Assemble into global matrix
-            for a, node_a in enumerate(elem_i.nodes):
-                for b, node_b in enumerate(elem_j.nodes):
-                    F[node_a.global_id, node_b.global_id] += (
-                        K_elem[a, b] * Vmat[node_a.global_id, node_b.global_id]
-                    )
+            accumulate(elem_i, elem_j, K_elem)
     else:
         print(f"[LinearSystem] Using {n_workers} parallel workers...")
         
@@ -345,12 +347,7 @@ def assemble_p1_geometric_kernel(scene: BuiltScene, n_workers: int = None) -> np
                         K_elem = future.result()
                         pair = future_to_pair[future]
                         elem_i, elem_j, _ = pair
-                        
-                        # Assemble into global matrix
-                        for a, node_a in enumerate(elem_i.nodes):
-                            for b, node_b in enumerate(elem_j.nodes):
-                                F[node_a.global_id, node_b.global_id] += K_elem[a, b]
-                                
+                        accumulate(elem_i, elem_j, K_elem)
                     except Exception as e:
                         print(f"[LinearSystem] Error computing element pair: {e}")
                         continue
@@ -362,12 +359,8 @@ def assemble_p1_geometric_kernel(scene: BuiltScene, n_workers: int = None) -> np
             for i, (elem_i, elem_j, n_quad) in enumerate(element_pairs):
                 if tqdm is not None and i % 100 == 0:
                     tqdm.write(f"Processing element pair {i}/{total_pairs}")
-                K_elem = compute_geometric_kernel_element_pair(elem_i, elem_j, n_quad)
-                
-                # Assemble into global matrix
-                for a, node_a in enumerate(elem_i.nodes):
-                    for b, node_b in enumerate(elem_j.nodes):
-                        F[node_a.global_id, node_b.global_id] += K_elem[a, b]
+                K_elem = compute_geometric_kernel_element_pair(elem_i, elem_j, n_quad, scene=scene)
+                accumulate(elem_i, elem_j, K_elem)
     
     print(f"[LinearSystem] Kernel assembly complete.")
     return F
