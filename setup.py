@@ -30,7 +30,7 @@ basis_type = "P1"  # Change to "P1" for Q1 bilinear basis
 skip_visibility = False
 
 # ---- Subdivisions ----
-rhodiv = 4  # density factor for patches
+rhodiv = 7  # density factor for patches
 subdivisions = Subdivisions(
     floor=(rhodiv * int(W), rhodiv * int(D)),
     ceiling=(int(W), int(D)),
@@ -44,20 +44,22 @@ subdivisions = Subdivisions(
 # ---- Light defaults ----
 light_size = (1.0, 1.0)
 
+z_0 = 0.0
+
 # ---- Composition-aware extra prisms (same subdivision as cube) ----
 prisms = [
     # P0: foreground slender (near camera, left), tall for depth
-    RectPrism(x0=1.4, x1=2.0, y0=0.6, y1=1.1, z0=1e-3, z1=1.5),
+    RectPrism(x0=0.6, x1=1.1, y0=1.4, y1=2.0, z0=z_0, z1=0.2),
     # P1: mid-right broad low block (secondary mass)
-    RectPrism(x0=3.4, x1=4.2, y0=1.8, y1=2.5, z0=1e-3, z1=0.6),
+    RectPrism(x0=3.4, x1=4.2, y0=1.8, y1=2.5, z0=z_0, z1=0.6),
     # P2: back-right slim tall (counterweight, far depth cue)
-    RectPrism(x0=4.1, x1=4.6, y0=4.0, y1=4.6, z0=1e-3, z1=1.8),
+    RectPrism(x0=4.1, x1=4.6, y0=4.0, y1=4.6, z0=z_0, z1=1.8),
     # P3: back-left small medium height (light anchor)
-    RectPrism(x0=0.6, x1=1.1, y0=3.8, y1=4.4, z0=1e-3, z1=0.9),
+    RectPrism(x0=0.6, x1=1.1, y0=3.8, y1=4.4, z0=z_0, z1=0.9),
 ]
 
 # ---- Main cube ----
-cube = CubeParams(size=1.0, z0=1e-3)
+cube = CubeParams(size=1.0, z0=z_0)
 
 # ---- Scene configuration (no fixed lights; scenarios below will define masks) ----
 scene_config = SceneConfig(
@@ -89,8 +91,8 @@ cam_up = np.array([0.0, 0.0, 1.0])
 width = 960
 height = 720
 fov_y_deg = 55.0
-exposure = 10.0
-brightness = 2.2
+exposure = 5.0
+brightness = 0.6
 # Percentile for tone mapping white point (e.g., 99.0 means 99th percentile)
-tone_white_percentile = 99.7
+tone_white_percentile = 99.0
 
