@@ -23,11 +23,16 @@ materials = Materials(
 
 # ---- Basis function type ----
 # Options: "P0" (constant per patch) or "P1" (Q1 bilinear per element)
-basis_type = "P1"  # Change to "P1" for Q1 bilinear basis
+basis_type = "P0"  # Change to "P1" for Q1 bilinear basis
 
 # ---- Visibility options ----
 # If True, skip computing geometric occlusion and use V(x,y)=1 (except diagonal)
 skip_visibility = False
+
+# ---- Pipeline I/O options ----
+# If False, the main pipeline will avoid exporting/saving intermediate CSV
+# matrices/vectors (A.csv, b.csv, x.csv, L.csv) and only save final images.
+save_intermediate_csv = True
 
 # ---- Subdivisions ----
 rhodiv = 7  # density factor for patches
@@ -95,4 +100,3 @@ exposure = 5.0
 brightness = 0.6
 # Percentile for tone mapping white point (e.g., 99.0 means 99th percentile)
 tone_white_percentile = 99.0
-

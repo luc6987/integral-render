@@ -1,3 +1,4 @@
+import os
 import numpy as np  # type: ignore
 from pathlib import Path
 from typing import Dict, Tuple, List, Optional
@@ -13,15 +14,104 @@ try:
 except Exception:  # pragma: no cover
     tqdm = None  # fallback if tqdm not available
 
+# --- Optional GPU backend (CuPy) ---
+try:  # pragma: no cover - optional dependency
+    import cupy as cp  # type: ignore
+
+    try:
+        _GPU_DEVICE_COUNT = cp.cuda.runtime.getDeviceCount()  # type: ignore[attr-defined]
+    except Exception:
+        _GPU_DEVICE_COUNT = 0
+    CUPY_AVAILABLE = _GPU_DEVICE_COUNT > 0
+except Exception:  # pragma: no cover
+    cp = None  # type: ignore
+    CUPY_AVAILABLE = False
+
+def _gpu_enabled_by_env() -> bool:
+    """Return True if GPU should be used when available.
+
+    Environment variable INTEGRAL_GPU can force behavior:
+      - '0' → disable
+      - '1' → enable (if CuPy and a device are available)
+    When unset, defaults to enabling if CuPy is available.
+    """
+    flag = os.getenv("INTEGRAL_GPU")
+    if flag is None:
+        return CUPY_AVAILABLE
+    return flag.strip() != "0" and CUPY_AVAILABLE
+
 
 def assemble_form_factor_matrix(
     centers: np.ndarray,
     normals: np.ndarray,
     areas: np.ndarray,
     V: Optional[np.ndarray] = None,
+    *,
+    use_gpu: Optional[bool] = None,
+    gpu_tile: Optional[int] = None,
 ) -> np.ndarray:
+    """Assemble form-factor matrix for P0 with optional GPU acceleration.
+
+    - When CuPy + CUDA are available and `use_gpu` is True (default auto),
+      computation runs on GPU in tiles of rows (size `gpu_tile`).
+    - Falls back to the original NumPy implementation otherwise.
+    """
     N = centers.shape[0]
     EPS = 1e-9
+
+    if use_gpu is None:
+        use_gpu = _gpu_enabled_by_env()
+
+    if use_gpu:
+        if not CUPY_AVAILABLE:
+            print("[LinearSystem][GPU] CuPy/CUDA not available; falling back to CPU.")
+        else:
+            try:
+                tsize = int(os.getenv("INTEGRAL_GPU_TILE", "256")) if gpu_tile is None else int(gpu_tile)
+            except Exception:
+                tsize = 256
+            tsize = max(32, tsize)
+            print(
+                f"[LinearSystem][GPU] Assembling F on GPU (N={N}), tile={tsize} rows..."
+            )
+            try:
+                # Move inputs to GPU
+                c_centers = cp.asarray(centers, dtype=cp.float64)
+                c_normals = cp.asarray(normals, dtype=cp.float64)
+                c_areas = cp.asarray(areas, dtype=cp.float64)
+                c_V = None if V is None else cp.asarray(V, dtype=cp.float64)
+                c_F = cp.zeros((N, N), dtype=cp.float64)
+                pi = float(np.pi)
+
+                for i0 in range(0, N, tsize):
+                    i1 = min(N, i0 + tsize)
+                    rows = i1 - i0
+                    ci = c_centers[i0:i1]  # (rows, 3)
+                    ni = c_normals[i0:i1]  # (rows, 3)
+                    # Broadcast against all targets j
+                    v = c_centers[None, :, :] - ci[:, None, :]  # (rows, N, 3)
+                    r2 = cp.sum(v * v, axis=2) + EPS
+                    r = cp.sqrt(r2)
+                    wi = v / r[:, :, None]
+                    cos_i = cp.sum(wi * ni[:, None, :], axis=2)  # (rows, N)
+                    cos_j = -cp.sum(wi * c_normals[None, :, :], axis=2)  # (rows, N)
+                    base = (cos_i * cos_j) / (pi * r2) * c_areas[None, :]
+                    vis_mask = (cos_i > 0.0) & (cos_j > 0.0)
+                    base = cp.where(vis_mask, base, 0.0)
+                    if c_V is not None:
+                        base = base * c_V[i0:i1, :]
+                    # Zero the diagonal entries for these rows
+                    rr = cp.arange(rows)
+                    cc = cp.arange(i0, i1)
+                    base[rr, cc] = 0.0
+                    c_F[i0:i1, :] = base
+
+                F_np = cp.asnumpy(c_F)
+                return F_np
+            except Exception as e:  # pragma: no cover
+                print(f"[LinearSystem][GPU] GPU path failed: {e}; falling back to CPU.")
+
+    # ---- CPU fallback (original implementation) ----
     F = np.zeros((N, N), dtype=np.float64)
     print(f"[LinearSystem] Assembling form factor matrix F of size {N}x{N}...")
     rng = range(N)
@@ -48,15 +138,30 @@ def assemble_form_factor_matrix(
 
 
 def enforce_reciprocity(F: np.ndarray, areas: np.ndarray) -> None:
-    N = F.shape[0]
+    """Enforce Ai Fij = Aj Fji (vectorized; supports NumPy and CuPy arrays)."""
     EPS = 1e-9
+    # Choose backend based on F type (np or cp)
+    is_gpu = CUPY_AVAILABLE and hasattr(cp, "ndarray") and isinstance(F, cp.ndarray)
+    xp = cp if is_gpu else np
+    a = areas if is_gpu else areas
+    if is_gpu:
+        a = cp.asarray(areas)
+    N = F.shape[0]
     print(f"[LinearSystem] Enforcing reciprocity on F (N={N})...")
-    for i in range(N):
-        for j in range(i + 1, N):
-            Tij = 0.5 * (areas[i] * F[i, j] + areas[j] * F[j, i])
-            F[i, j] = Tij / (areas[i] + EPS)
-            F[j, i] = Tij / (areas[j] + EPS)
-    np.fill_diagonal(F, 0.0)
+    iu = xp.triu_indices(N, k=1)
+    i, j = iu[0], iu[1]
+    Ai = a[i]
+    Aj = a[j]
+    Fij = F[i, j]
+    Fji = F[j, i]
+    Tij = 0.5 * (Ai * Fij + Aj * Fji)
+    F[i, j] = Tij / (Ai + EPS)
+    F[j, i] = Tij / (Aj + EPS)
+    # Zero diagonal
+    if is_gpu:
+        F[xp.arange(N), xp.arange(N)] = 0.0
+    else:
+        np.fill_diagonal(F, 0.0)
     print("[LinearSystem] Reciprocity enforcement complete.")
 
 
