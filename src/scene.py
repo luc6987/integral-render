@@ -54,6 +54,15 @@ class SceneConfig:
     basis_type: str = "P0"
 
 
+def _is_coplanar_bottom(z0: float, eps: float = 1e-6) -> bool:
+    """Return True if a bottom face at z0 is coplanar with the floor (z=0).
+
+    We treat near-zero within eps as coplanar and will skip generating such faces
+    to avoid duplicate/hidden surfaces in all downstream computations.
+    """
+    return abs(z0 - 0.0) <= eps
+
+
 class Patch:
     __slots__ = (
         "center",
@@ -470,15 +479,18 @@ def build_scene_p1(config: SceneConfig) -> BuiltScene:
     all_nodes.extend(nodes)
     all_elements.extend(elements)
 
-    # Cube faces
+    # Cube faces (conditionally include bottom if not coplanar with floor)
     cube_faces = [
         ("cube_top", np.array([cube_x0, cube_y0, cube_z1]), np.array([cube_x1 - cube_x0, 0.0, 0.0]), np.array([0.0, cube_y1 - cube_y0, 0.0]), np.array([0, 0, 1])),
-        ("cube_bottom", np.array([cube_x0, cube_y0, cube_z0]), np.array([cube_x1 - cube_x0, 0.0, 0.0]), np.array([0.0, cube_y1 - cube_y0, 0.0]), np.array([0, 0, -1])),
+    ]
+    if not _is_coplanar_bottom(cube_z0):
+        cube_faces.append(("cube_bottom", np.array([cube_x0, cube_y0, cube_z0]), np.array([cube_x1 - cube_x0, 0.0, 0.0]), np.array([0.0, cube_y1 - cube_y0, 0.0]), np.array([0, 0, -1])))
+    cube_faces.extend([
         ("cube_x0", np.array([cube_x0, cube_y0, cube_z0]), np.array([0.0, cube_y1 - cube_y0, 0.0]), np.array([0.0, 0.0, cube_z1 - cube_z0]), np.array([-1, 0, 0])),
         ("cube_x1", np.array([cube_x1, cube_y0, cube_z0]), np.array([0.0, cube_y1 - cube_y0, 0.0]), np.array([0.0, 0.0, cube_z1 - cube_z0]), np.array([1, 0, 0])),
         ("cube_y0", np.array([cube_x0, cube_y0, cube_z0]), np.array([cube_x1 - cube_x0, 0.0, 0.0]), np.array([0.0, 0.0, cube_z1 - cube_z0]), np.array([0, -1, 0])),
         ("cube_y1", np.array([cube_x0, cube_y1, cube_z0]), np.array([cube_x1 - cube_x0, 0.0, 0.0]), np.array([0.0, 0.0, cube_z1 - cube_z0]), np.array([0, 1, 0])),
-    ]
+    ])
     
     for face_name, origin, ux, uy, normal in cube_faces:
         nodes, elements = _make_p1_grid_on_plane(
@@ -505,12 +517,13 @@ def build_scene_p1(config: SceneConfig) -> BuiltScene:
             
             prism_faces = [
                 (f"{name}_top", np.array([rp.x0, rp.y0, rp.z1]), np.array([rp.x1 - rp.x0, 0.0, 0.0]), np.array([0.0, rp.y1 - rp.y0, 0.0]), np.array([0, 0, 1])),
-                (f"{name}_bottom", np.array([rp.x0, rp.y0, rp.z0]), np.array([rp.x1 - rp.x0, 0.0, 0.0]), np.array([0.0, rp.y1 - rp.y0, 0.0]), np.array([0, 0, -1])),
                 (f"{name}_x0", np.array([rp.x0, rp.y0, rp.z0]), np.array([0.0, rp.y1 - rp.y0, 0.0]), np.array([0.0, 0.0, rp.z1 - rp.z0]), np.array([-1, 0, 0])),
                 (f"{name}_x1", np.array([rp.x1, rp.y0, rp.z0]), np.array([0.0, rp.y1 - rp.y0, 0.0]), np.array([0.0, 0.0, rp.z1 - rp.z0]), np.array([1, 0, 0])),
                 (f"{name}_y0", np.array([rp.x0, rp.y0, rp.z0]), np.array([rp.x1 - rp.x0, 0.0, 0.0]), np.array([0.0, 0.0, rp.z1 - rp.z0]), np.array([0, -1, 0])),
                 (f"{name}_y1", np.array([rp.x0, rp.y1, rp.z0]), np.array([rp.x1 - rp.x0, 0.0, 0.0]), np.array([0.0, 0.0, rp.z1 - rp.z0]), np.array([0, 1, 0])),
             ]
+            if not _is_coplanar_bottom(rp.z0):
+                prism_faces.insert(1, (f"{name}_bottom", np.array([rp.x0, rp.y0, rp.z0]), np.array([rp.x1 - rp.x0, 0.0, 0.0]), np.array([0.0, rp.y1 - rp.y0, 0.0]), np.array([0, 0, -1])))
             
             for face_name, origin, ux, uy, normal in prism_faces:
                 nodes, elements = _make_p1_grid_on_plane(
@@ -547,17 +560,20 @@ def build_scene_p1(config: SceneConfig) -> BuiltScene:
         "wall_y0": sub_wall_y0,
         "wall_y1": sub_wall_y1,
         "cube_top": sub_cube,
-        "cube_bottom": sub_cube,
         "cube_x0": sub_cube,
         "cube_x1": sub_cube,
         "cube_y0": sub_cube,
         "cube_y1": sub_cube,
     }
+    if not _is_coplanar_bottom(cube_z0):
+        sub_by_face["cube_bottom"] = sub_cube
 
     # Register prism faces
     for pb in prisms:
-        for suffix in ("top", "bottom", "x0", "x1", "y0", "y1"):
+        for suffix in ("top", "x0", "x1", "y0", "y1"):
             sub_by_face[f"{pb.name}_{suffix}"] = sub_cube
+        if not _is_coplanar_bottom(pb.z0):
+            sub_by_face[f"{pb.name}_bottom"] = sub_cube
 
     cube_bounds = {
         "cube_x0": cube_x0,
@@ -585,10 +601,32 @@ def build_scene_p1(config: SceneConfig) -> BuiltScene:
     )
 
 
+def build_scene_p0_with_fake_p1_marking(config: SceneConfig) -> BuiltScene:
+    """Build scene using P0 patches but mark as P1_fake for interpolation rendering."""
+    # Temporarily change basis_type to P0 for the actual building
+    original_basis_type = config.basis_type
+    config.basis_type = "P0"
+    
+    # Build the scene using P0 logic
+    scene = build_scene(config)
+    
+    # Mark it as P1_fake for rendering interpolation
+    scene.basis_type = "P1_fake"
+    
+    # Restore original basis_type
+    config.basis_type = original_basis_type
+    
+    print(f"[Scene] Built P1_fake scene: {len(scene.patches)} patches (P0 assembly + P1 interpolation)")
+    return scene
+
+
 def build_scene(config: SceneConfig) -> BuiltScene:
     """Build scene with either P0 or P1 basis functions based on config.basis_type."""
     if config.basis_type == "P1":
         return build_scene_p1(config)
+    elif config.basis_type == "P1_fake":
+        # Use P0 scene building but mark as P1_fake for interpolation
+        return build_scene_p0_with_fake_p1_marking(config)
     
     # P0 implementation (original)
     W, D, H = config.box.W, config.box.D, config.box.H
@@ -729,19 +767,20 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         "cube_top",
     )
 
-    origin_cbot = np.array([cube_x0, cube_y0, cube_z0])
-    ux_cbot = np.array([cube_x1 - cube_x0, 0.0, 0.0])
-    uy_cbot = np.array([0.0, cube_y1 - cube_y0, 0.0])
-    patches += _make_grid_on_plane(
-        origin_cbot,
-        ux_cbot,
-        uy_cbot,
-        sub_cube[0],
-        sub_cube[1],
-        rho_cube,
-        np.array([0, 0, -1]),
-        "cube_bottom",
-    )
+    if not _is_coplanar_bottom(cube_z0):
+        origin_cbot = np.array([cube_x0, cube_y0, cube_z0])
+        ux_cbot = np.array([cube_x1 - cube_x0, 0.0, 0.0])
+        uy_cbot = np.array([0.0, cube_y1 - cube_y0, 0.0])
+        patches += _make_grid_on_plane(
+            origin_cbot,
+            ux_cbot,
+            uy_cbot,
+            sub_cube[0],
+            sub_cube[1],
+            rho_cube,
+            np.array([0, 0, -1]),
+            "cube_bottom",
+        )
 
     origin_cx0 = np.array([cube_x0, cube_y0, cube_z0])
     ux_cx0 = np.array([0.0, cube_y1 - cube_y0, 0.0])
@@ -825,21 +864,22 @@ def build_scene(config: SceneConfig) -> BuiltScene:
             )
             prism_bounds_map[face_top] = pb
             # Bottom
-            origin_pbot = np.array([rp.x0, rp.y0, rp.z0])
-            ux_pbot = np.array([rp.x1 - rp.x0, 0.0, 0.0])
-            uy_pbot = np.array([0.0, rp.y1 - rp.y0, 0.0])
-            face_bot = f"{name}_bottom"
-            patches += _make_grid_on_plane(
-                origin_pbot,
-                ux_pbot,
-                uy_pbot,
-                sub_cube[0],
-                sub_cube[1],
-                rho_cube,
-                np.array([0, 0, -1]),
-                face_bot,
-            )
-            prism_bounds_map[face_bot] = pb
+            if not _is_coplanar_bottom(rp.z0):
+                origin_pbot = np.array([rp.x0, rp.y0, rp.z0])
+                ux_pbot = np.array([rp.x1 - rp.x0, 0.0, 0.0])
+                uy_pbot = np.array([0.0, rp.y1 - rp.y0, 0.0])
+                face_bot = f"{name}_bottom"
+                patches += _make_grid_on_plane(
+                    origin_pbot,
+                    ux_pbot,
+                    uy_pbot,
+                    sub_cube[0],
+                    sub_cube[1],
+                    rho_cube,
+                    np.array([0, 0, -1]),
+                    face_bot,
+                )
+                prism_bounds_map[face_bot] = pb
             # x0
             origin_px0 = np.array([rp.x0, rp.y0, rp.z0])
             ux_px0 = np.array([0.0, rp.y1 - rp.y0, 0.0])
@@ -920,17 +960,20 @@ def build_scene(config: SceneConfig) -> BuiltScene:
         "wall_y0": sub_wall_y0,
         "wall_y1": sub_wall_y1,
         "cube_top": sub_cube,
-        "cube_bottom": sub_cube,
         "cube_x0": sub_cube,
         "cube_x1": sub_cube,
         "cube_y0": sub_cube,
         "cube_y1": sub_cube,
     }
+    if not _is_coplanar_bottom(cube_z0):
+        sub_by_face["cube_bottom"] = sub_cube
 
     # Register prism faces with same subdivision as cube
     for pb in prisms:
-        for suffix in ("top", "bottom", "x0", "x1", "y0", "y1"):
+        for suffix in ("top", "x0", "x1", "y0", "y1"):
             sub_by_face[f"{pb.name}_{suffix}"] = sub_cube
+        if not _is_coplanar_bottom(pb.z0):
+            sub_by_face[f"{pb.name}_bottom"] = sub_cube
 
     cube_bounds = {
         "cube_x0": cube_x0,

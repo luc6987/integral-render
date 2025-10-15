@@ -14,31 +14,6 @@ try:
 except Exception:  # pragma: no cover
     tqdm = None  # fallback if tqdm not available
 
-# --- Optional GPU backend (CuPy) ---
-try:  # pragma: no cover - optional dependency
-    import cupy as cp  # type: ignore
-
-    try:
-        _GPU_DEVICE_COUNT = cp.cuda.runtime.getDeviceCount()  # type: ignore[attr-defined]
-    except Exception:
-        _GPU_DEVICE_COUNT = 0
-    CUPY_AVAILABLE = _GPU_DEVICE_COUNT > 0
-except Exception:  # pragma: no cover
-    cp = None  # type: ignore
-    CUPY_AVAILABLE = False
-
-def _gpu_enabled_by_env() -> bool:
-    """Return True if GPU should be used when available.
-
-    Environment variable INTEGRAL_GPU can force behavior:
-      - '0' → disable
-      - '1' → enable (if CuPy and a device are available)
-    When unset, defaults to enabling if CuPy is available.
-    """
-    flag = os.getenv("INTEGRAL_GPU")
-    if flag is None:
-        return CUPY_AVAILABLE
-    return flag.strip() != "0" and CUPY_AVAILABLE
 
 
 def assemble_form_factor_matrix(
@@ -46,72 +21,11 @@ def assemble_form_factor_matrix(
     normals: np.ndarray,
     areas: np.ndarray,
     V: Optional[np.ndarray] = None,
-    *,
-    use_gpu: Optional[bool] = None,
-    gpu_tile: Optional[int] = None,
 ) -> np.ndarray:
-    """Assemble form-factor matrix for P0 with optional GPU acceleration.
-
-    - When CuPy + CUDA are available and `use_gpu` is True (default auto),
-      computation runs on GPU in tiles of rows (size `gpu_tile`).
-    - Falls back to the original NumPy implementation otherwise.
-    """
+    """Assemble form-factor matrix for P0 using CPU computation."""
     N = centers.shape[0]
     EPS = 1e-9
 
-    if use_gpu is None:
-        use_gpu = _gpu_enabled_by_env()
-
-    if use_gpu:
-        if not CUPY_AVAILABLE:
-            print("[LinearSystem][GPU] CuPy/CUDA not available; falling back to CPU.")
-        else:
-            try:
-                tsize = int(os.getenv("INTEGRAL_GPU_TILE", "256")) if gpu_tile is None else int(gpu_tile)
-            except Exception:
-                tsize = 256
-            tsize = max(32, tsize)
-            print(
-                f"[LinearSystem][GPU] Assembling F on GPU (N={N}), tile={tsize} rows..."
-            )
-            try:
-                # Move inputs to GPU
-                c_centers = cp.asarray(centers, dtype=cp.float64)
-                c_normals = cp.asarray(normals, dtype=cp.float64)
-                c_areas = cp.asarray(areas, dtype=cp.float64)
-                c_V = None if V is None else cp.asarray(V, dtype=cp.float64)
-                c_F = cp.zeros((N, N), dtype=cp.float64)
-                pi = float(np.pi)
-
-                for i0 in range(0, N, tsize):
-                    i1 = min(N, i0 + tsize)
-                    rows = i1 - i0
-                    ci = c_centers[i0:i1]  # (rows, 3)
-                    ni = c_normals[i0:i1]  # (rows, 3)
-                    # Broadcast against all targets j
-                    v = c_centers[None, :, :] - ci[:, None, :]  # (rows, N, 3)
-                    r2 = cp.sum(v * v, axis=2) + EPS
-                    r = cp.sqrt(r2)
-                    wi = v / r[:, :, None]
-                    cos_i = cp.sum(wi * ni[:, None, :], axis=2)  # (rows, N)
-                    cos_j = -cp.sum(wi * c_normals[None, :, :], axis=2)  # (rows, N)
-                    base = (cos_i * cos_j) / (pi * r2) * c_areas[None, :]
-                    vis_mask = (cos_i > 0.0) & (cos_j > 0.0)
-                    base = cp.where(vis_mask, base, 0.0)
-                    if c_V is not None:
-                        base = base * c_V[i0:i1, :]
-                    # Zero the diagonal entries for these rows
-                    rr = cp.arange(rows)
-                    cc = cp.arange(i0, i1)
-                    base[rr, cc] = 0.0
-                    c_F[i0:i1, :] = base
-
-                F_np = cp.asnumpy(c_F)
-                return F_np
-            except Exception as e:  # pragma: no cover
-                print(f"[LinearSystem][GPU] GPU path failed: {e}; falling back to CPU.")
-
-    # ---- CPU fallback (original implementation) ----
     F = np.zeros((N, N), dtype=np.float64)
     print(f"[LinearSystem] Assembling form factor matrix F of size {N}x{N}...")
     rng = range(N)
@@ -138,45 +52,32 @@ def assemble_form_factor_matrix(
 
 
 def enforce_reciprocity(F: np.ndarray, areas: np.ndarray) -> None:
-    """Enforce Ai Fij = Aj Fji (vectorized; supports NumPy and CuPy arrays)."""
+    """Enforce Ai Fij = Aj Fji (vectorized NumPy implementation)."""
     EPS = 1e-9
-    # Choose backend based on F type (np or cp)
-    is_gpu = CUPY_AVAILABLE and hasattr(cp, "ndarray") and isinstance(F, cp.ndarray)
-    xp = cp if is_gpu else np
-    a = areas if is_gpu else areas
-    if is_gpu:
-        a = cp.asarray(areas)
     N = F.shape[0]
     print(f"[LinearSystem] Enforcing reciprocity on F (N={N})...")
-    iu = xp.triu_indices(N, k=1)
+    iu = np.triu_indices(N, k=1)
     i, j = iu[0], iu[1]
-    Ai = a[i]
-    Aj = a[j]
+    Ai = areas[i]
+    Aj = areas[j]
     Fij = F[i, j]
     Fji = F[j, i]
     Tij = 0.5 * (Ai * Fij + Aj * Fji)
     F[i, j] = Tij / (Ai + EPS)
     F[j, i] = Tij / (Aj + EPS)
     # Zero diagonal
-    if is_gpu:
-        F[xp.arange(N), xp.arange(N)] = 0.0
-    else:
-        np.fill_diagonal(F, 0.0)
+    np.fill_diagonal(F, 0.0)
     print("[LinearSystem] Reciprocity enforcement complete.")
 
 
-def build_linear_system(scene: BuiltScene) -> Tuple[np.ndarray, np.ndarray]:
-    """Build linear system for either P0 or P1 basis functions."""
-    if scene.basis_type == "P1":
-        return build_linear_system_p1(scene)
-    
-    # P0 implementation (original)
+def build_linear_system_p0(scene: BuiltScene) -> Tuple[np.ndarray, np.ndarray]:
+    """Build P0 linear system (F, E)."""
     print("[LinearSystem] Building P0 linear system (F, E)...")
     # Visibility matrix shared across bases
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
     cache_dir = PROJECT_ROOT / "linear_system_csv"
     Vmat, vtag, vpath = get_or_build_visibility(
-        scene, cache_dir, skip=skip_visibility, basis_type=scene.basis_type
+        scene, cache_dir, skip=skip_visibility, basis_type="P0"  # Always use P0 for visibility
     )
     F = assemble_form_factor_matrix(
         scene.centers,
@@ -190,6 +91,18 @@ def build_linear_system(scene: BuiltScene) -> Tuple[np.ndarray, np.ndarray]:
         f"[LinearSystem] Built F (shape={F.shape}), initialized E (len={E.shape[0]})."
     )
     return F, E
+
+
+def build_linear_system(scene: BuiltScene) -> Tuple[np.ndarray, np.ndarray]:
+    """Build linear system for either P0 or P1 basis functions."""
+    if scene.basis_type == "P1":
+        return build_linear_system_p1(scene)
+    elif scene.basis_type == "P1_fake":
+        # Use P0 linear system assembly for P1_fake
+        return build_linear_system_p0(scene)
+    
+    # P0 implementation (original)
+    return build_linear_system_p0(scene)
 
 
 def q1_basis_functions(xi: float, eta: float) -> np.ndarray:
@@ -670,6 +583,14 @@ def _build_M_E_for_scenario(scene: BuiltScene, F: np.ndarray, *, positions, size
         # Lumped RHS per scenario
         f = _build_p1_lumped_rhs(scene, positions=positions, size=size, Le=Le)
         return A, f
+    elif scene.basis_type == "P1_fake":
+        # Use P0 implementation for P1_fake
+        is_light_mask = compute_ceiling_light_mask(scene, light_positions=positions, light_size=size)
+        E = np.zeros(scene.centers.shape[0])
+        E[is_light_mask] = np.pi * Le
+        rho = np.where(is_light_mask, 0.0, scene.rho)
+        M = build_system_matrix(F, rho)
+        return M, E
     
     # P0 implementation (original)
     # Build E and rho from light mask, then M = I - diag(rho) F

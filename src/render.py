@@ -25,6 +25,7 @@ from setup import (
     exposure,
     brightness,
     tone_white_percentile,
+    hide_walls_ceiling,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -82,29 +83,135 @@ def solve_radiosity(
     return B, L
 
 
-def build_L_face(scene: BuiltScene, L: np.ndarray) -> Dict[str, np.ndarray]:
+def build_L_face(scene: BuiltScene, L: np.ndarray, light_mask: Optional[np.ndarray] = None, hide_walls_ceiling: bool = False) -> Dict[str, np.ndarray]:
     if scene.basis_type == "P1":
-        return build_L_face_p1(scene, L)
+        return build_L_face_p1(scene, L, light_mask, hide_walls_ceiling)
+    elif scene.basis_type == "P1_fake":
+        return build_L_face_p1_fake(scene, L, light_mask, hide_walls_ceiling)
     
-    # P0 implementation (original)
+    # P0 implementation (original) - Hide light patches and optionally all walls/ceiling in rendering
     def collect_face_map(face_name: str, sub: Tuple[int, int]) -> np.ndarray:
         nx, ny = sub
         V = np.zeros((ny, nx))
         for idx, p in enumerate(scene.patches):
             if p.face == face_name:
                 i, j = p.ij
-                V[j, i] = L[idx]
+                # Hide light patches: set their radiance to 0 in rendering
+                is_light = p.is_light
+                if light_mask is not None and idx < len(light_mask):
+                    is_light = is_light or light_mask[idx]
+                
+                # Hide all walls and ceiling if requested
+                should_hide = is_light
+                if hide_walls_ceiling and p.face in ['ceiling', 'wall_x0', 'wall_x1', 'wall_y0', 'wall_y1']:
+                    should_hide = True
+                
+                if should_hide:
+                    V[j, i] = 0.0
+                else:
+                    V[j, i] = L[idx]
         return V
 
     # Build maps for all faces registered in sub_by_face (handles prisms dynamically)
     L_face: Dict[str, np.ndarray] = {}
     for face_name, sub in scene.sub_by_face.items():
         L_face[face_name] = collect_face_map(face_name, sub)
-    print(f"[Render] Built L_face for {len(L_face)} faces.")
+    print(f"[Render] Built L_face for {len(L_face)} faces (light patches hidden).")
     return L_face
 
 
-def build_L_face_p1(scene: BuiltScene, L: np.ndarray) -> Dict[str, np.ndarray]:
+def build_L_face_p1_fake(scene: BuiltScene, L: np.ndarray, light_mask: Optional[np.ndarray] = None, hide_walls_ceiling: bool = False) -> Dict[str, np.ndarray]:
+    """Build per-face node-value grids for P1_fake interpolation.
+
+    For each face with subdivision (nx, ny), we create a node grid of shape (ny+1, nx+1)
+    by interpolating from P0 patch values. The corner nodes get values from adjacent patches,
+    and interior nodes get interpolated values. Light patches are hidden in rendering.
+    """
+    def build_face_node_grid_p1_fake(face_name: str, sub: Tuple[int, int]) -> np.ndarray:
+        nx, ny = sub
+        if nx < 1 or ny < 1:
+            return np.zeros((ny + 1, nx + 1))
+        
+        # Create node grid
+        node_grid = np.zeros((ny + 1, nx + 1))
+        
+        # Get patches for this face
+        face_patches = [patch for patch in scene.patches if patch.face == face_name]
+        if not face_patches:
+            return node_grid
+        
+        # Create a mapping from (i,j) to patch index for this face
+        patch_map = {}
+        for patch in face_patches:
+            patch_map[patch.ij] = patch
+        
+        # Fill the node grid by interpolating from patches
+        for j in range(ny + 1):
+            for i in range(nx + 1):
+                # For corner nodes, use the adjacent patch value
+                # For edge nodes, average two adjacent patches
+                # For interior nodes, average four adjacent patches
+                
+                # Determine which patches contribute to this node
+                contributing_patches = []
+                
+                # Check all four possible adjacent patches
+                if i > 0 and j > 0:  # bottom-left patch
+                    patch_idx = (i-1, j-1)
+                    if patch_idx in patch_map:
+                        contributing_patches.append(patch_map[patch_idx])
+                
+                if i < nx and j > 0:  # bottom-right patch
+                    patch_idx = (i, j-1)
+                    if patch_idx in patch_map:
+                        contributing_patches.append(patch_map[patch_idx])
+                
+                if i > 0 and j < ny:  # top-left patch
+                    patch_idx = (i-1, j)
+                    if patch_idx in patch_map:
+                        contributing_patches.append(patch_map[patch_idx])
+                
+                if i < nx and j < ny:  # top-right patch
+                    patch_idx = (i, j)
+                    if patch_idx in patch_map:
+                        contributing_patches.append(patch_map[patch_idx])
+                
+                # Average the contributing patches (excluding light patches)
+                if contributing_patches:
+                    # Find the patch indices in the global patch list
+                    patch_indices = []
+                    for patch in contributing_patches:
+                        for idx, global_patch in enumerate(scene.patches):
+                            if global_patch == patch:
+                                # Skip light patches in rendering
+                                # Check both patch.is_light and light_mask if provided
+                                is_light = global_patch.is_light
+                                if light_mask is not None and idx < len(light_mask):
+                                    is_light = is_light or light_mask[idx]
+                                
+                                # Also skip walls and ceiling if requested
+                                should_hide = is_light
+                                if hide_walls_ceiling and global_patch.face in ['ceiling', 'wall_x0', 'wall_x1', 'wall_y0', 'wall_y1']:
+                                    should_hide = True
+                                
+                                if not should_hide:
+                                    patch_indices.append(idx)
+                                break
+                    
+                    if patch_indices:
+                        node_grid[j, i] = np.mean(L[patch_indices])
+                    # If all contributing patches are lights, the node remains 0 (black)
+        
+        return node_grid
+
+    L_face: Dict[str, np.ndarray] = {}
+    for face_name, sub in scene.sub_by_face.items():
+        L_face[face_name] = build_face_node_grid_p1_fake(face_name, sub)
+    print(f"[Render] Built P1_fake node grids for {len(L_face)} faces (light patches hidden).")
+    return L_face
+
+
+def build_L_face_p1(scene: BuiltScene, L: np.ndarray, light_mask: Optional[np.ndarray] = None, hide_walls_ceiling: bool = False) -> Dict[str, np.ndarray]:
     """Build per-face node-value grids for P1.
 
     For each face with subdivision (nx, ny), we return an array of shape (ny+1, nx+1)
@@ -123,7 +230,28 @@ def build_L_face_p1(scene: BuiltScene, L: np.ndarray) -> Dict[str, np.ndarray]:
                 node_id_grid[jj, ii] = node.global_id
         if (node_id_grid < 0).any():
             return np.zeros((ny + 1, nx + 1))
-        return L[node_id_grid]
+        
+        # Hide light nodes in rendering
+        node_values = L[node_id_grid].copy()
+        for j in range(ny + 1):
+            for i in range(nx + 1):
+                node_id = node_id_grid[j, i]
+                if node_id >= 0:
+                    # Check if this node is a light node
+                    node = scene.nodes[node_id]
+                    is_light = node.is_light
+                    if light_mask is not None and node_id < len(light_mask):
+                        is_light = is_light or light_mask[node_id]
+                    
+                    # Also hide walls and ceiling if requested
+                    should_hide = is_light
+                    if hide_walls_ceiling and node.face in ['ceiling', 'wall_x0', 'wall_x1', 'wall_y0', 'wall_y1']:
+                        should_hide = True
+                    
+                    if should_hide:
+                        node_values[j, i] = 0.0  # Hide light nodes and walls/ceiling
+        
+        return node_values
 
     L_face: Dict[str, np.ndarray] = {}
     for face_name, sub in scene.sub_by_face.items():
@@ -377,6 +505,43 @@ def render_photo(
             L11 = grid[j0 + 1, i0 + 1]
             L01 = grid[j0 + 1, i0 + 0]
             return (1 - du) * (1 - dv) * L00 + du * (1 - dv) * L10 + du * dv * L11 + (1 - du) * dv * L01
+        elif scene.basis_type == "P1_fake":
+            # Bicubic Catmull–Rom interpolation on node grid (ny+1, nx+1)
+            grid = L_face[face]
+
+            def clamp(v: int, lo: int, hi: int) -> int:
+                return lo if v < lo else (hi if v > hi else v)
+
+            def catmull_rom(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
+                # Standard Catmull–Rom spline (centripetal tension=0.5 implicit in basis form)
+                return 0.5 * (
+                    (2.0 * p1)
+                    + (-p0 + p2) * t
+                    + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * (t * t)
+                    + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * (t * t * t)
+                )
+
+            # Continuous coordinates in node space
+            x = u * nx
+            y = v * ny
+            ix = int(np.floor(x))
+            iy = int(np.floor(y))
+            tx = x - ix
+            ty = y - iy
+
+            # Gather 4x4 neighborhood with edge clamping
+            def sample(i: int, j: int) -> float:
+                return float(grid[clamp(j, 0, ny), clamp(i, 0, nx)])
+
+            cols = []
+            for jj in range(iy - 1, iy + 3):
+                p0 = sample(ix - 1, jj)
+                p1 = sample(ix + 0, jj)
+                p2 = sample(ix + 1, jj)
+                p3 = sample(ix + 2, jj)
+                cols.append(catmull_rom(p0, p1, p2, p3, tx))
+            # Now interpolate along y
+            return float(catmull_rom(cols[0], cols[1], cols[2], cols[3], ty))
         else:
             # P0: piecewise constant per patch
             i = min(nx - 1, max(0, int(u * nx)))
@@ -384,7 +549,7 @@ def render_photo(
             return float(L_face[face][j, i])
 
     # Tone mapping reference: use percentile white point, not absolute max
-    if scene.basis_type == "P1":
+    if scene.basis_type in ("P1", "P1_fake"):
         # Gather all node values
         all_vals = []
         for arr in L_face.values():
@@ -478,7 +643,9 @@ def main_from_csv():
         cols = 1 if Lmat.ndim == 1 else Lmat.shape[1]
         for k in range(cols):
             Lvec = Lmat if cols == 1 else Lmat[:, k]
-            L_face = build_L_face(scene, Lvec)
+            # For CSV rendering, we don't have light_mask, so pass None
+            # This means we rely on scene.patches[].is_light flags only
+            L_face = build_L_face(scene, Lvec, light_mask=None, hide_walls_ceiling=hide_walls_ceiling)
             img = render_photo(
                 scene=scene,
                 box=scene_config.box,

@@ -25,6 +25,7 @@ from setup import (
     exposure,
     brightness,
     save_intermediate_csv,
+    hide_walls_ceiling,
 )
 
 
@@ -59,8 +60,17 @@ def main():
         # Solve in memory
         x = np.linalg.solve(A, b)
         L = x / np.pi
+        
+        # Compute light mask for rendering
+        from src.scene import compute_ceiling_light_mask
+        light_mask = compute_ceiling_light_mask(
+            scene, 
+            light_positions=sc.get("positions", []), 
+            light_size=sc.get("size", scene_config.light_size)
+        )
+        
         # Render
-        L_face = build_L_face(scene, L)
+        L_face = build_L_face(scene, L, light_mask, hide_walls_ceiling)
         img = render_photo(
             scene=scene,
             box=scene_config.box,

@@ -22,12 +22,16 @@ materials = Materials(
 )
 
 # ---- Basis function type ----
-# Options: "P0" (constant per patch) or "P1" (Q1 bilinear per element)
-basis_type = "P0"  # Change to "P1" for Q1 bilinear basis
+# Options: "P0" (constant per patch), "P1" (Q1 bilinear per element), or "P1_fake" (P0 assembly with P1 interpolation)
+basis_type = "P1_fake"  # Change to "P1" for Q1 bilinear basis, or "P1_fake" for P0+P1 interpolation
 
 # ---- Visibility options ----
 # If True, skip computing geometric occlusion and use V(x,y)=1 (except diagonal)
 skip_visibility = False
+
+# ---- Rendering options ----
+# If True, hide all walls and ceiling in rendering (make them black)
+hide_walls_ceiling = True
 
 # ---- Pipeline I/O options ----
 # If False, the main pipeline will avoid exporting/saving intermediate CSV
@@ -35,7 +39,7 @@ skip_visibility = False
 save_intermediate_csv = True
 
 # ---- Subdivisions ----
-rhodiv = 7  # density factor for patches
+rhodiv = 10  # density factor for patches
 subdivisions = Subdivisions(
     floor=(rhodiv * int(W), rhodiv * int(D)),
     ceiling=(int(W), int(D)),
@@ -49,7 +53,7 @@ subdivisions = Subdivisions(
 # ---- Light defaults ----
 light_size = (1.0, 1.0)
 
-z_0 = 0.0
+z_0 = 0
 
 # ---- Composition-aware extra prisms (same subdivision as cube) ----
 prisms = [
@@ -96,7 +100,7 @@ cam_up = np.array([0.0, 0.0, 1.0])
 width = 960
 height = 720
 fov_y_deg = 55.0
-exposure = 5.0
-brightness = 0.6
+exposure = 7.0
+brightness = 1.0
 # Percentile for tone mapping white point (e.g., 99.0 means 99th percentile)
 tone_white_percentile = 99.0
